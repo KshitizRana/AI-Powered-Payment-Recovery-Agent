@@ -1,0 +1,24 @@
+{
+  "name": "@repo/server",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@repo/db": "workspace:*",
+    "@repo/shared": "workspace:*",
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.0",
+    "razorpay": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "*",
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}

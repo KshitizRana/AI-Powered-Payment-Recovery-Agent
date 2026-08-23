@@ -1,0 +1,11 @@
+{
+  "extends": "@repo/typescript-config/base",
+  "compilerOptions": {
+    "types": [
+      "bun"
+    ]
+  },
+  "include": [
+    "src/**/*"
+  ]
+}
