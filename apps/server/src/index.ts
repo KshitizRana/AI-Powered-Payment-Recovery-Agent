@@ -4,11 +4,13 @@ import { logger } from "hono/logger";
 import "dotenv/config";
 import config from "./config/config";
 import { AppError } from "./utils/appError";
+import { webhookRoutes } from "./routes/webhook";
 
 
 const app = new Hono();
 
 app.use("*", logger());
+app.route("/webhooks", webhookRoutes);
 app.use(
     "*",
     cors({
