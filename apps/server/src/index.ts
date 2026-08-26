@@ -5,6 +5,9 @@ import "dotenv/config";
 import config from "./config/config";
 import { AppError } from "./utils/appError";
 import { webhookRoutes } from "./routes/webhook";
+import { serve } from "inngest/hono";
+import { inngest } from "./inngest/client";
+import { subscriptionRecovery } from "./inngest/functions";
 
 
 const app = new Hono();
@@ -17,6 +20,14 @@ app.use(
         origin: ["http://localhost:3000"],
         allowMethods: ["GET", "POST", "PUT", "DELETE"],
         allowHeaders: ["Content-Type", "Authorization"],
+    })
+);
+app.on(
+    ["GET", "POST", "PUT"],
+    "/api/inngest",
+    serve({
+        client: inngest,
+        functions: [subscriptionRecovery],
     })
 );
 

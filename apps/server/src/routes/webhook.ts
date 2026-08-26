@@ -5,6 +5,7 @@ import { WebhookEvent } from "@repo/shared";
 import type { RazorpayWebhookPayload } from "@repo/shared";
 import config from "../config/config";
 import Razorpay from "razorpay";
+import { inngest } from "../inngest/client";
 
 export const webhookRoutes = new Hono();
 
@@ -71,25 +72,41 @@ webhookRoutes.post("/razorpay", async (c) => {
 
     switch (eventType) {
         case WebhookEvent.SUBSCRIPTION_PENDING:
-            console.log("Subscription entered pending state — recovery needed");
+        case WebhookEvent.SUBSCRIPTION_HALTED: {
+            console.log(`Subscription failure detected — triggering recovery`);
+            const sub = payload.payload.subscription?.entity;
+            const payment = payload.payload.payment?.entity;
+            await inngest.send({
+                name: "payment/subscription.failed",
+                data: {
+                    subscriptionId: sub?.id || "unknown",
+                    paymentId: payment?.id,
+                    customerId: sub?.customer_id,
+                    customerEmail: payment?.email,
+                    customerPhone: payment?.contact,
+                    amount: payment?.amount || 0,
+                    currency: payment?.currency || "INR",
+                    declineCode: payment?.error_code,
+                    errorDescription: payment?.error_description,
+                    failedAt: new Date().toISOString(),
+                },
+            });
             break;
-
-        case WebhookEvent.SUBSCRIPTION_HALTED:
-            console.log("Subscription halted — all retries exhausted");
-            break;
-
-        case WebhookEvent.SUBSCRIPTION_ACTIVATED:
+        }
+        case WebhookEvent.SUBSCRIPTION_ACTIVATED: {
             console.log("Subscription re-activated — recovery successful!");
+            // The running Inngest function will detect this on its next check
             break;
-
-        case WebhookEvent.PAYMENT_FAILED:
-            console.log("Payment failed");
+        }
+        case WebhookEvent.PAYMENT_FAILED: {
+            console.log("Payment failed — logging for now");
+            // TODO: Handle standalone payment failures (checkout abandonment)
             break;
-
-        case WebhookEvent.PAYMENT_CAPTURED:
-            console.log("Payment captured");
+        }
+        case WebhookEvent.PAYMENT_CAPTURED: {
+            console.log("Payment captured successfully");
             break;
-
+        }
         default:
             console.log(`Unhandled webhook event: ${eventType}`);
     }
