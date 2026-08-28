@@ -1,22 +1,32 @@
 import { inngest } from "../client";
+import { MAX_CONCURRENT_RECOVERIES, HARD_DECLINE_WAIT_TIME, DEFAULT_CURRENCY, ESCALATION_WAIT_TIME } from "../../constants/constants";
 import { db, recoveryAttempts, recoveryActions, auditLogs, customers } from "@repo/db";
 import { eq } from "@repo/db";
 import { fetchSubscription, createPaymentLink } from "../../services/razorpay.service";
 import { classifyDeclineCode, ESCALATION_STEPS } from "@repo/shared";
+import { diagnoseFailure, generateRecoveryMessage, determineNextAction } from "../../services/ai.service";
+import { runPreActionGuardrails } from "../../lib/guardrails";
 
 export const subscriptionRecovery = inngest.createFunction(
     {
         id: "subscription-recovery",
-        concurrency: { limit: 10 }, // max 10 concurrent recoveries
+        concurrency: { limit: MAX_CONCURRENT_RECOVERIES }, // max concurrent recoveries
         triggers: [{ event: "payment/subscription.failed" }],
     },
     async ({ event, step }) => {
         const { subscriptionId, paymentId, amount, currency, declineCode, errorDescription } = event.data;
 
         // ── Step 1: Classify the failure ──
-        const classification = await step.run("classify-failure", async () => {
-            const result = classifyDeclineCode(declineCode, errorDescription);
-            console.log(`Classified: ${result.category} | Retriable: ${result.retriable}`);
+        const diagnosis = await step.run("ai-diagnose", async () => {
+            const result = await diagnoseFailure({
+                errorCode: declineCode,
+                errorDescription: errorDescription,
+                amount,
+                currency: currency || DEFAULT_CURRENCY,
+                customerEmail: event.data.customerEmail,
+            });
+
+            console.log(`AI Diagnosis: ${result.failureCategory} | Action: ${result.recommendedAction}`);
             return result;
         });
 
@@ -27,10 +37,10 @@ export const subscriptionRecovery = inngest.createFunction(
                 subscriptionId: event.data.subscriptionId ? undefined : undefined, // Link if you have UUID
                 razorpayEntityId: subscriptionId,
                 status: "detected",
-                failureCategory: classification.category,
+                failureCategory: diagnosis.failureCategory,
                 declineCode: declineCode || null,
                 amountAtRisk: amount,
-                currency: currency || "INR",
+                currency: currency || DEFAULT_CURRENCY,
             }).returning();
 
             if (!record) {
@@ -45,17 +55,17 @@ export const subscriptionRecovery = inngest.createFunction(
                 recoveryAttemptId: recovery.id,
                 eventType: "recovery.detected",
                 actor: "system",
-                action: `Recovery started for subscription ${subscriptionId}. Failure: ${classification.category}`,
-                details: { classification, event: event.data },
+                action: `Recovery started for subscription ${subscriptionId}. Failure: ${diagnosis.failureCategory}`,
+                details: { diagnosis, event: event.data },
             });
         });
 
         // ── Step 4: Hard decline? Send payment link immediately ──
-        if (classification.category === "hard_decline") {
+        if (diagnosis.failureCategory === "hard_decline") {
             await step.run("send-payment-link", async () => {
                 const link = await createPaymentLink({
                     amount,
-                    currency: currency || "INR",
+                    currency: currency || DEFAULT_CURRENCY,
                     customerEmail: event.data.customerEmail,
                     customerPhone: event.data.customerPhone,
                     description: `Complete your subscription payment`,
@@ -75,8 +85,8 @@ export const subscriptionRecovery = inngest.createFunction(
                 console.log(`Payment link sent: ${link.short_url}`);
             });
 
-            // Wait 2 days then check
-            await step.sleep("wait-after-payment-link", "2d");
+            // Wait before checking
+            await step.sleep("wait-after-payment-link", HARD_DECLINE_WAIT_TIME);
 
             const recovered = await step.run("check-hard-decline-recovery", async () => {
                 try {
@@ -108,7 +118,9 @@ export const subscriptionRecovery = inngest.createFunction(
         // ── Step 5: Soft decline / Gateway error → Escalation cascade ──
         for (const escalation of ESCALATION_STEPS) {
             if (escalation.delayHours > 0) {
-                await step.sleep(`wait-step-${escalation.step}`, `${escalation.delayHours}h`);
+                // Using the constant for fast testing, otherwise would be `${escalation.delayHours}h`
+                const waitTime = ESCALATION_WAIT_TIME || `${escalation.delayHours}h`;
+                await step.sleep(`wait-step-${escalation.step}`, waitTime);
             }
 
             // Check if already recovered
@@ -144,17 +156,84 @@ export const subscriptionRecovery = inngest.createFunction(
             }
 
             // Not recovered — execute escalation action
-            // TODO (Day 3): Replace this with AI-determined action
+
+            // 1. Guardrails Check
+            const guardrail = await step.run(`guardrails-step-${escalation.step}`, async () => {
+                return await runPreActionGuardrails({
+                    customerId: event.data.customerId,
+                    amountPaise: amount,
+                });
+            });
+
+            if (!guardrail.allowed) {
+                await step.run(`mark-abandoned-guardrail-${escalation.step}`, async () => {
+                    await db.update(recoveryAttempts)
+                        .set({ status: "abandoned", abandonedAt: new Date() })
+                        .where(eq(recoveryAttempts.id, recovery.id));
+
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: recovery.id,
+                        eventType: "recovery.abandoned",
+                        actor: "system",
+                        action: `Recovery stopped due to guardrails at step ${escalation.step}: ${guardrail.reason}`,
+                    });
+                });
+                return { status: "abandoned", reason: guardrail.reason, step: escalation.step, amount };
+            }
+
+            // 2. Determine Next Action via AI
+            const nextAction = await step.run(`determine-action-step-${escalation.step}`, async () => {
+                const prev = await db.select().from(recoveryActions).where(eq(recoveryActions.recoveryAttemptId, recovery.id));
+                return await determineNextAction({
+                    failureCategory: diagnosis.failureCategory,
+                    currentStep: escalation.step,
+                    maxSteps: ESCALATION_STEPS.length,
+                    previousActions: prev.map(p => ({ actionType: p.actionType, status: p.status, channel: p.channel || undefined })),
+                    amount,
+                    customerOptedOut: false, // Handled by guardrails
+                    daysSinceFailure: 0,
+                });
+            });
+
+            if (nextAction.shouldStop) {
+                await step.run(`mark-abandoned-ai-${escalation.step}`, async () => {
+                    await db.update(recoveryAttempts)
+                        .set({ status: "abandoned", abandonedAt: new Date() })
+                        .where(eq(recoveryAttempts.id, recovery.id));
+
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: recovery.id,
+                        eventType: "recovery.abandoned",
+                        actor: "system",
+                        action: `Recovery stopped by AI at step ${escalation.step}: ${nextAction.stopReason}`,
+                    });
+                });
+                return { status: "abandoned", reason: nextAction.stopReason, step: escalation.step, amount };
+            }
+
+            // 3. Generate Personalized Message
+            const message = await step.run(`generate-message-step-${escalation.step}`, async () => {
+                return await generateRecoveryMessage({
+                    customerName: event.data.customerEmail || "Valued Customer",
+                    amount,
+                    currency: currency || DEFAULT_CURRENCY,
+                    failureCategory: diagnosis.failureCategory,
+                    escalationStep: escalation.step,
+                    channel: nextAction.channel || escalation.channel,
+                    productDescription: "your subscription",
+                });
+            });
+
+            // 4. Execute Action
             await step.run(`execute-step-${escalation.step}`, async () => {
-                // For now, just log + create a recovery action record
                 await db.insert(recoveryActions).values({
                     recoveryAttemptId: recovery.id,
                     stepNumber: escalation.step,
-                    actionType: "send_email", // TODO: AI picks this
+                    actionType: nextAction.action,
                     status: "sent",
-                    aiReasoning: `Escalation step ${escalation.step}: ${escalation.label}`,
-                    channel: escalation.channel,
-                    messageContent: `Recovery message for step ${escalation.step}`, // TODO: AI generates
+                    aiReasoning: nextAction.reasoning,
+                    channel: nextAction.channel || escalation.channel,
+                    messageContent: message.body,
                 });
 
                 await db.update(recoveryAttempts)
@@ -165,7 +244,7 @@ export const subscriptionRecovery = inngest.createFunction(
                     recoveryAttemptId: recovery.id,
                     eventType: `recovery.escalation.step-${escalation.step}`,
                     actor: "system",
-                    action: `Executed ${escalation.label} via ${escalation.channel}`,
+                    action: `Executed ${nextAction.action} via ${nextAction.channel || escalation.channel}`,
                 });
             });
         }
