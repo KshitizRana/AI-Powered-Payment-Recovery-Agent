@@ -11,8 +11,12 @@ const envSchema = z.object({
     DATABASE_URL: z.string(),
     OPENAI_API_KEY: z.string(),
     FRONTEND_URL: z.string(),
-
-
+    SMTP_HOST: z.string(),
+    SMTP_PORT: z.coerce.number(),
+    SMTP_USER: z.string(),
+    SMTP_PASS: z.string(),
+    EMAIL_FROM: z.string(),
+    PRODUCT_NAME: z.string(),
 });
 
 const env = envSchema.safeParse(process.env);
@@ -29,7 +33,12 @@ const config = {
     DATABASE_URL: env.data.DATABASE_URL,
     OPENAI_API_KEY: env.data.OPENAI_API_KEY,
     FRONTEND_URL: env.data.FRONTEND_URL,
-
+    SMTP_HOST: env.data.SMTP_HOST,
+    SMTP_PORT: env.data.SMTP_PORT,
+    SMTP_USER: env.data.SMTP_USER,
+    SMTP_PASS: env.data.SMTP_PASS,
+    EMAIL_FROM: env.data.EMAIL_FROM,
+    PRODUCT_NAME: env.data.PRODUCT_NAME,
 };
 
 export default config;

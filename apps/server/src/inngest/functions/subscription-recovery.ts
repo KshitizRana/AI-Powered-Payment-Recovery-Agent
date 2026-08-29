@@ -7,6 +7,7 @@ import { classifyDeclineCode, ESCALATION_STEPS } from "@repo/shared";
 import { diagnoseFailure, generateRecoveryMessage, determineNextAction, deriveDisplayName } from "../../services/ai.service";
 import { runPreActionGuardrails } from "../../lib/guardrails";
 import { incrementRecoveryAttempts, markCustomerContacted, markCustomerRecovered } from "../../services/customer.service";
+import { sendNotification } from "../../services/notification.service";
 
 export const subscriptionRecovery = inngest.createFunction(
     {
@@ -288,7 +289,13 @@ export const subscriptionRecovery = inngest.createFunction(
                 let paymentLinkId: string | undefined;
                 let paymentLinkUrl: string | undefined;
 
-                if (nextAction.action === "send_payment_link") {
+                // [FIX] A payment link isn't just for the "send_payment_link" action — almost
+                // every contact action's whole point is getting the customer somewhere they
+                // can pay. Mint one for any contact action too, not only when the AI's label
+                // literally says send_payment_link.
+                const needsLink = nextAction.action === "send_payment_link" || isContactAction;
+
+                if (needsLink) {
                     const expiryHours = Math.max(48 - escalation.step * 6, 12);
                     const link = await createPaymentLink({
                         amount,
@@ -318,6 +325,23 @@ export const subscriptionRecovery = inngest.createFunction(
                 await db.update(recoveryAttempts)
                     .set({ currentStep: escalation.step, status: "intervention_sent" })
                     .where(eq(recoveryAttempts.id, recovery.id));
+
+                // [FIX] This was being generated and stored but never actually sent
+                if (isContactAction && message) {
+                    const recipient = channel === "email" ? event.data.customerEmail : event.data.customerPhone;
+                    if (recipient) {
+                        await sendNotification(channel, {
+                            to: recipient,
+                            subject: message.subject,
+                            body: message.body,
+                            customerName: deriveDisplayName(event.data.customerEmail),
+                            actionUrl: paymentLinkUrl,
+                            actionText: message.callToAction,
+                            tone: message.tone,
+                            recoveryAttemptId: recovery.id,
+                        });
+                    }
+                }
 
                 if (isContactAction && recovery.customerId) {
                     await markCustomerContacted(recovery.customerId);
