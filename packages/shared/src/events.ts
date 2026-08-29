@@ -53,4 +53,10 @@ export interface RecoveryEvents {
       recoveryAttemptId: string;
     };
   };
+  "payment/subscription.recovered": {
+    data: {
+      subscriptionId: string;
+      recoveredAt: string;
+    };
+  };
 }

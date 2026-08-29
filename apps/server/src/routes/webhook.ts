@@ -6,6 +6,7 @@ import type { RazorpayWebhookPayload } from "@repo/shared";
 import config from "../config/config";
 import Razorpay from "razorpay";
 import { inngest } from "../inngest/client";
+import { upsertCustomer } from "../services/customer.service";
 
 export const webhookRoutes = new Hono();
 
@@ -76,12 +77,17 @@ webhookRoutes.post("/razorpay", async (c) => {
             console.log(`Subscription failure detected — triggering recovery`);
             const sub = payload.payload.subscription?.entity;
             const payment = payload.payload.payment?.entity;
+            const customer = await upsertCustomer({
+                razorpayCustomerId: sub?.customer_id,
+                email: payment?.email,
+                phone: payment?.contact,
+            });
             await inngest.send({
                 name: "payment/subscription.failed",
                 data: {
                     subscriptionId: sub?.id || "unknown",
                     paymentId: payment?.id,
-                    customerId: sub?.customer_id,
+                    customerId: customer?.id,
                     customerEmail: payment?.email,
                     customerPhone: payment?.contact,
                     amount: payment?.amount || 0,
@@ -94,8 +100,16 @@ webhookRoutes.post("/razorpay", async (c) => {
             break;
         }
         case WebhookEvent.SUBSCRIPTION_ACTIVATED: {
-            console.log("Subscription re-activated — recovery successful!");
-            // The running Inngest function will detect this on its next check
+            const sub = payload.payload.subscription?.entity;
+            console.log(` Subscription ${sub?.id} re-activated — notifying any running recovery`);
+
+            await inngest.send({
+                name: "payment/subscription.recovered",
+                data: {
+                    subscriptionId: sub?.id || "unknown",
+                    recoveredAt: new Date().toISOString(),
+                },
+            });
             break;
         }
         case WebhookEvent.PAYMENT_FAILED: {

@@ -13,3 +13,5 @@ export const ESCALATION_WAIT_TIME = "15s";
 export const AI_DIAGNOSIS_TEMPERATURE = 0.3;
 export const AI_MESSAGE_TEMPERATURE = 0.7;
 export const AI_NEXT_ACTION_TEMPERATURE = 0.3;
+
+export const HIGH_VALUE_THRESHOLD_PAISE = 10000

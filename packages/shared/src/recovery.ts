@@ -85,3 +85,7 @@ export const ESCALATION_STEPS = [
 ] as const;
 
 export const MAX_RECOVERY_ATTEMPTS = ESCALATION_STEPS.length;
+
+export const RECOVERY_CONFIG = {
+    MIN_RECOVERY_AMOUNT_PAISE: 10000,
+}

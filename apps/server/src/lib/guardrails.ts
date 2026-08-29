@@ -1,9 +1,16 @@
-import { db, customers, recoveryAttempts } from "@repo/db";
-import { eq, and, gte } from "@repo/db";
+import { db, customers, recoveryAttempts, eq, and, gte } from "@repo/db";
+import { getCustomerGuardrailContext } from "../services/customer.service";
+import { RECOVERY_CONFIG } from "@repo/shared";
 
 export interface GuardrailCheck {
     allowed: boolean;
     reason?: string;
+}
+
+interface GuardrailResult {
+    allowed: boolean;
+    reason?: string;
+    preferredChannel?: "email" | "sms" | "whatsapp" | null;
 }
 
 // ── 1. DND / Opt-out check ──
@@ -76,23 +83,64 @@ export function validateAIOutput(output: any, expectedFields: string[]): Guardra
 }
 
 // ── 5. Run all pre-action guardrails ──
-export async function runPreActionGuardrails(context: {
+// export async function runPreActionGuardrails(context: {
+//     customerId?: string;
+//     amountPaise: number;
+// }): Promise<GuardrailCheck> {
+//     // Check amount threshold
+//     const amountCheck = checkAmountThreshold(context.amountPaise);
+//     if (!amountCheck.allowed) return amountCheck;
+
+//     // Check DND
+//     if (context.customerId) {
+//         const dndCheck = await checkDND(context.customerId);
+//         if (!dndCheck.allowed) return dndCheck;
+
+//         // Check contact frequency
+//         const frequencyCheck = await checkContactFrequency(context.customerId);
+//         if (!frequencyCheck.allowed) return frequencyCheck;
+//     }
+
+//     return { allowed: true };
+// }
+
+const MIN_CONTACT_GAP_HOURS = 20; // slightly under 24h so a 24h-cadence step never blocks on its own cadence
+
+export async function runPreActionGuardrails(params: {
     customerId?: string;
     amountPaise: number;
-}): Promise<GuardrailCheck> {
-    // Check amount threshold
-    const amountCheck = checkAmountThreshold(context.amountPaise);
-    if (!amountCheck.allowed) return amountCheck;
-
-    // Check DND
-    if (context.customerId) {
-        const dndCheck = await checkDND(context.customerId);
-        if (!dndCheck.allowed) return dndCheck;
-
-        // Check contact frequency
-        const frequencyCheck = await checkContactFrequency(context.customerId);
-        if (!frequencyCheck.allowed) return frequencyCheck;
+}): Promise<GuardrailResult> {
+    // Cheap check first, no DB hit
+    if (params.amountPaise < RECOVERY_CONFIG.MIN_RECOVERY_AMOUNT_PAISE) {
+        return { allowed: false, reason: `Amount ₹${params.amountPaise / 100} below recovery threshold` };
     }
 
-    return { allowed: true };
+    // Guest/anonymous checkouts have no customerId yet — nothing to check against
+    if (!params.customerId) {
+        return { allowed: true };
+    }
+
+    const customer = await getCustomerGuardrailContext(params.customerId);
+
+    if (!customer) {
+        // customerId was passed but doesn't resolve — fail open rather than
+        // silently blocking a legitimate recovery over a data issue
+        return { allowed: true };
+    }
+
+    if (customer.optedOut) {
+        return { allowed: false, reason: "Customer has opted out (DND)" };
+    }
+
+    if (customer.lastContactedAt) {
+        const hoursSinceLastContact = (Date.now() - customer.lastContactedAt.getTime()) / (1000 * 60 * 60);
+        if (hoursSinceLastContact < MIN_CONTACT_GAP_HOURS) {
+            return {
+                allowed: false,
+                reason: `Contacted ${hoursSinceLastContact.toFixed(1)}h ago — under the ${MIN_CONTACT_GAP_HOURS}h minimum gap`,
+            };
+        }
+    }
+
+    return { allowed: true, preferredChannel: customer.preferredChannel };
 }

@@ -1,17 +1,24 @@
 import { inngest } from "../client";
-import { MAX_CONCURRENT_RECOVERIES, HARD_DECLINE_WAIT_TIME, DEFAULT_CURRENCY, ESCALATION_WAIT_TIME } from "../../constants/constants";
+import { MAX_CONCURRENT_RECOVERIES, HARD_DECLINE_WAIT_TIME, DEFAULT_CURRENCY, ESCALATION_WAIT_TIME, HIGH_VALUE_THRESHOLD_PAISE } from "../../constants/constants"; // [CHANGED] added HIGH_VALUE_THRESHOLD_PAISE
 import { db, recoveryAttempts, recoveryActions, auditLogs, customers } from "@repo/db";
 import { eq } from "@repo/db";
 import { fetchSubscription, createPaymentLink } from "../../services/razorpay.service";
 import { classifyDeclineCode, ESCALATION_STEPS } from "@repo/shared";
-import { diagnoseFailure, generateRecoveryMessage, determineNextAction } from "../../services/ai.service";
+import { diagnoseFailure, generateRecoveryMessage, determineNextAction, deriveDisplayName } from "../../services/ai.service";
 import { runPreActionGuardrails } from "../../lib/guardrails";
+import { incrementRecoveryAttempts, markCustomerContacted, markCustomerRecovered } from "../../services/customer.service";
 
 export const subscriptionRecovery = inngest.createFunction(
     {
         id: "subscription-recovery",
         concurrency: { limit: MAX_CONCURRENT_RECOVERIES }, // max concurrent recoveries
         triggers: [{ event: "payment/subscription.failed" }],
+        cancelOn: [
+            {
+                event: "payment/subscription.recovered",
+                if: "async.data.subscriptionId == event.data.subscriptionId",
+            },
+        ],
     },
     async ({ event, step }) => {
         const { subscriptionId, paymentId, amount, currency, declineCode, errorDescription } = event.data;
@@ -34,7 +41,7 @@ export const subscriptionRecovery = inngest.createFunction(
         const recovery = await step.run("create-recovery-record", async () => {
             const [record] = await db.insert(recoveryAttempts).values({
                 type: "subscription_renewal",
-                subscriptionId: event.data.subscriptionId ? undefined : undefined, // Link if you have UUID
+                customerId: event.data.customerId,
                 razorpayEntityId: subscriptionId,
                 status: "detected",
                 failureCategory: diagnosis.failureCategory,
@@ -46,6 +53,11 @@ export const subscriptionRecovery = inngest.createFunction(
             if (!record) {
                 throw new Error("Failed to create recovery attempt record");
             }
+
+            if (event.data.customerId) {
+                await incrementRecoveryAttempts(event.data.customerId);
+            }
+
             return record;
         });
 
@@ -62,10 +74,34 @@ export const subscriptionRecovery = inngest.createFunction(
 
         // ── Step 4: Hard decline? Send payment link immediately ──
         if (diagnosis.failureCategory === "hard_decline") {
+            const hardDeclineGuardrail = await step.run("guardrails-hard-decline", async () => {
+                return await runPreActionGuardrails({
+                    customerId: recovery.customerId ?? undefined,
+                    amountPaise: amount,
+                });
+            });
+
+            if (!hardDeclineGuardrail.allowed) {
+                await step.run("mark-abandoned-guardrail-hard-decline", async () => {
+                    await db.update(recoveryAttempts)
+                        .set({ status: "abandoned", abandonedAt: new Date() })
+                        .where(eq(recoveryAttempts.id, recovery.id));
+
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: recovery.id,
+                        eventType: "recovery.abandoned",
+                        actor: "system",
+                        action: `Recovery stopped by guardrail before hard-decline payment link: ${hardDeclineGuardrail.reason}`,
+                    });
+                });
+                return { status: "abandoned", reason: hardDeclineGuardrail.reason, amount };
+            }
+
             await step.run("send-payment-link", async () => {
                 const link = await createPaymentLink({
                     amount,
                     currency: currency || DEFAULT_CURRENCY,
+                    customerName: deriveDisplayName(event.data.customerEmail),
                     customerEmail: event.data.customerEmail,
                     customerPhone: event.data.customerPhone,
                     description: `Complete your subscription payment`,
@@ -81,6 +117,10 @@ export const subscriptionRecovery = inngest.createFunction(
                     paymentLinkId: link.id,
                     paymentLinkUrl: link.short_url,
                 });
+
+                if (recovery.customerId) {
+                    await markCustomerContacted(recovery.customerId);
+                }
 
                 console.log(`Payment link sent: ${link.short_url}`);
             });
@@ -104,6 +144,10 @@ export const subscriptionRecovery = inngest.createFunction(
                         .set({ status: "recovered", amountRecovered: amount, recoveredAt: new Date() })
                         .where(eq(recoveryAttempts.id, recovery.id));
 
+                    if (recovery.customerId) {
+                        await markCustomerRecovered(recovery.customerId);
+                    }
+
                     await db.insert(auditLogs).values({
                         recoveryAttemptId: recovery.id,
                         eventType: "recovery.completed",
@@ -118,12 +162,10 @@ export const subscriptionRecovery = inngest.createFunction(
         // ── Step 5: Soft decline / Gateway error → Escalation cascade ──
         for (const escalation of ESCALATION_STEPS) {
             if (escalation.delayHours > 0) {
-                // Using the constant for fast testing, otherwise would be `${escalation.delayHours}h`
                 const waitTime = ESCALATION_WAIT_TIME || `${escalation.delayHours}h`;
                 await step.sleep(`wait-step-${escalation.step}`, waitTime);
             }
 
-            // Check if already recovered
             const isRecovered = await step.run(`check-recovery-step-${escalation.step}`, async () => {
                 try {
                     const sub = await fetchSubscription(subscriptionId);
@@ -145,6 +187,10 @@ export const subscriptionRecovery = inngest.createFunction(
                         })
                         .where(eq(recoveryAttempts.id, recovery.id));
 
+                    if (recovery.customerId) {
+                        await markCustomerRecovered(recovery.customerId);
+                    }
+
                     await db.insert(auditLogs).values({
                         recoveryAttemptId: recovery.id,
                         eventType: "recovery.completed",
@@ -155,12 +201,10 @@ export const subscriptionRecovery = inngest.createFunction(
                 return { status: "recovered", step: escalation.step, amount };
             }
 
-            // Not recovered — execute escalation action
-
             // 1. Guardrails Check
             const guardrail = await step.run(`guardrails-step-${escalation.step}`, async () => {
                 return await runPreActionGuardrails({
-                    customerId: event.data.customerId,
+                    customerId: recovery.customerId ?? undefined,
                     amountPaise: amount,
                 });
             });
@@ -184,6 +228,11 @@ export const subscriptionRecovery = inngest.createFunction(
             // 2. Determine Next Action via AI
             const nextAction = await step.run(`determine-action-step-${escalation.step}`, async () => {
                 const prev = await db.select().from(recoveryActions).where(eq(recoveryActions.recoveryAttemptId, recovery.id));
+
+                const daysSinceFailure = Math.floor(
+                    (Date.now() - new Date(event.data.failedAt || Date.now()).getTime()) / (1000 * 60 * 60 * 24)
+                );
+
                 return await determineNextAction({
                     failureCategory: diagnosis.failureCategory,
                     currentStep: escalation.step,
@@ -191,7 +240,8 @@ export const subscriptionRecovery = inngest.createFunction(
                     previousActions: prev.map(p => ({ actionType: p.actionType, status: p.status, channel: p.channel || undefined })),
                     amount,
                     customerOptedOut: false, // Handled by guardrails
-                    daysSinceFailure: 0,
+                    daysSinceFailure,
+                    preferredChannel: guardrail.preferredChannel, // [NEW] AI now sees this before deciding, not just as a fallback after
                 });
             });
 
@@ -211,58 +261,96 @@ export const subscriptionRecovery = inngest.createFunction(
                 return { status: "abandoned", reason: nextAction.stopReason, step: escalation.step, amount };
             }
 
-            // 3. Generate Personalized Message
-            const message = await step.run(`generate-message-step-${escalation.step}`, async () => {
-                return await generateRecoveryMessage({
-                    customerName: event.data.customerEmail || "Valued Customer",
-                    amount,
-                    currency: currency || DEFAULT_CURRENCY,
-                    failureCategory: diagnosis.failureCategory,
-                    escalationStep: escalation.step,
-                    channel: nextAction.channel || escalation.channel,
-                    productDescription: "your subscription",
+            // Resolve channel once — AI's pick wins; this fallback chain now mostly
+            // just covers the model returning null, since it already sees preferredChannel above
+            const channel = nextAction.channel || guardrail.preferredChannel || escalation.channel;
+            const isContactAction = nextAction.action === "send_email" || nextAction.action === "send_sms" || nextAction.action === "send_whatsapp";
+
+            // 3. Generate Personalized Message — only for actions that actually contact the customer
+            let message: Awaited<ReturnType<typeof generateRecoveryMessage>> | undefined;
+            if (isContactAction) {
+                message = await step.run(`generate-message-step-${escalation.step}`, async () => {
+                    return await generateRecoveryMessage({
+                        customerName: deriveDisplayName(event.data.customerEmail),
+                        amount,
+                        currency: currency || DEFAULT_CURRENCY,
+                        failureCategory: diagnosis.failureCategory,
+                        escalationStep: escalation.step,
+                        maxSteps: ESCALATION_STEPS.length, // [NEW] required param — replaces the old hardcoded "of 5"
+                        channel,
+                        productDescription: "your subscription",
+                    });
                 });
-            });
+            }
 
             // 4. Execute Action
             await step.run(`execute-step-${escalation.step}`, async () => {
+                let paymentLinkId: string | undefined;
+                let paymentLinkUrl: string | undefined;
+
+                if (nextAction.action === "send_payment_link") {
+                    const expiryHours = Math.max(48 - escalation.step * 6, 12);
+                    const link = await createPaymentLink({
+                        amount,
+                        currency: currency || DEFAULT_CURRENCY,
+                        customerName: deriveDisplayName(event.data.customerEmail),
+                        customerEmail: event.data.customerEmail,
+                        customerPhone: event.data.customerPhone,
+                        description: "Complete your subscription payment",
+                        expireBy: Math.floor(Date.now() / 1000) + expiryHours * 3600,
+                    });
+                    paymentLinkId = link.id;
+                    paymentLinkUrl = link.short_url;
+                }
+
                 await db.insert(recoveryActions).values({
                     recoveryAttemptId: recovery.id,
                     stepNumber: escalation.step,
                     actionType: nextAction.action,
                     status: "sent",
                     aiReasoning: nextAction.reasoning,
-                    channel: nextAction.channel || escalation.channel,
-                    messageContent: message.body,
+                    channel,
+                    messageContent: message?.body,
+                    paymentLinkId,
+                    paymentLinkUrl,
                 });
 
                 await db.update(recoveryAttempts)
                     .set({ currentStep: escalation.step, status: "intervention_sent" })
                     .where(eq(recoveryAttempts.id, recovery.id));
 
+                if (isContactAction && recovery.customerId) {
+                    await markCustomerContacted(recovery.customerId);
+                }
+
                 await db.insert(auditLogs).values({
                     recoveryAttemptId: recovery.id,
                     eventType: `recovery.escalation.step-${escalation.step}`,
                     actor: "system",
-                    action: `Executed ${nextAction.action} via ${nextAction.channel || escalation.channel}`,
+                    action: `Executed ${nextAction.action} via ${channel}`,
                 });
             });
         }
 
-        // All steps exhausted — mark abandoned
+        // All steps exhausted — high-value recoveries get escalated to a human instead of abandoned
         await step.run("mark-abandoned", async () => {
+            const isHighValue = amount >= HIGH_VALUE_THRESHOLD_PAISE; // [CHANGED] now imported from constants, was a local const before
+            const finalStatus = isHighValue ? "escalated" : "abandoned";
+
             await db.update(recoveryAttempts)
-                .set({ status: "abandoned", abandonedAt: new Date() })
+                .set({ status: finalStatus, abandonedAt: new Date() })
                 .where(eq(recoveryAttempts.id, recovery.id));
 
             await db.insert(auditLogs).values({
                 recoveryAttemptId: recovery.id,
-                eventType: "recovery.abandoned",
+                eventType: isHighValue ? "recovery.escalated_to_human" : "recovery.abandoned",
                 actor: "system",
-                action: `All ${ESCALATION_STEPS.length} recovery steps exhausted. Marked as abandoned.`,
+                action: isHighValue
+                    ? `₹${amount / 100} at risk after ${ESCALATION_STEPS.length} steps — escalating to a human instead of giving up.`
+                    : `All ${ESCALATION_STEPS.length} recovery steps exhausted. Marked as abandoned.`,
             });
         });
 
-        return { status: "abandoned", totalSteps: ESCALATION_STEPS.length, amount };
+        return { status: "finalized", totalSteps: ESCALATION_STEPS.length, amount };
     }
 );
