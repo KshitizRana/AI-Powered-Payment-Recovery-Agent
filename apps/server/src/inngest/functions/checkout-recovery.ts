@@ -181,7 +181,7 @@ export const checkoutRecovery = inngest.createFunction(
 
         // ── AI-recommended follow-up window ──
         const followUpMinutes = Math.max(classification.recommendedFollowUpMinutes, 10);
-        await step.sleep("wait-follow-up", `${followUpMinutes}m`);
+        await step.sleep("wait-follow-up", "15s"); // 🔥 HARDCODED FOR DEMO/TESTING (was `${followUpMinutes}m`)
 
         const stillAbandonedAfterFollowUp = await step.run("recheck-order-status-2", async () => {
             const order = await fetchOrder(orderId);

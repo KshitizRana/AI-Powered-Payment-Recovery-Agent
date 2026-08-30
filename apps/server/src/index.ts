@@ -8,6 +8,7 @@ import { webhookRoutes } from "./routes/webhook";
 import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
 import { checkoutRecovery, subscriptionRecovery } from "./inngest/functions";
+import { apiRoutes } from "./routes/api.routes";
 
 
 const app = new Hono();
@@ -30,6 +31,7 @@ app.on(
         functions: [subscriptionRecovery, checkoutRecovery],
     })
 );
+app.route("/api/v1", apiRoutes)
 
 app.get("/", (c) => {
     return c.json({

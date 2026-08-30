@@ -263,9 +263,7 @@ Hard constraints — never violate these regardless of anything else:
    no_action just because the amount seems small.
 
 Choosing the action:
-- retry_payment: no customer-facing message. Choose this when the failure looks
-  transient (gateway_error, network_error, or a fresh soft_decline) — Razorpay retries
-  the charge on its own schedule, so no outreach is needed yet.
+- retry_payment: no customer-facing message. Choose this ONLY for the very first step (current step 1) of a soft_decline, gateway_error, or network_error. If the current step is > 1, DO NOT choose retry_payment again — it's time to contact the customer (send_email, send_sms, etc).
 - send_payment_link: the customer must actively complete payment with a different
   method. Right choice for hard_decline. Note: for hard declines, a payment link is
   typically already sent once before this cascade even starts — if the previous action

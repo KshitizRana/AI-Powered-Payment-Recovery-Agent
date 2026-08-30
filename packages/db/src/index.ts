@@ -2,7 +2,7 @@ import "dotenv/config";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, sql, sum } from "drizzle-orm";
 
 import * as schema from "./schema";
 
@@ -20,7 +20,7 @@ export const db = drizzle({ client: pool });
 
 export { pool };
 export { schema };
-export { eq, and, gte, sql }
+export { eq, and, gte, sql, desc, count, sum }
 
 export * from "./schema";
 
