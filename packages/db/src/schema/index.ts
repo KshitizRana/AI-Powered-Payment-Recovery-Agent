@@ -6,3 +6,4 @@ export * from "./recovery-attempts";
 export * from "./audit-logs";
 export * from "./recovery-actions";
 export * from "./notifications";
+export * from "./processed-webhooks";

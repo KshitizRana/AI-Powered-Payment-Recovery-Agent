@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import crypto from "crypto";
-import { db, auditLogs, recoveryAttempts, and, eq } from "@repo/db";
+import { db, auditLogs, recoveryAttempts, and, eq, processedWebhooks } from "@repo/db";
 import { WebhookEvent } from "@repo/shared";
 import type { RazorpayWebhookPayload } from "@repo/shared";
 import config from "../config/config";
@@ -9,25 +9,6 @@ import { inngest } from "../inngest/client";
 import { upsertCustomer } from "../services/customer.service";
 
 export const webhookRoutes = new Hono();
-
-function verifyWebhookSignature(
-    body: string,
-    signature: string,
-    secret: string
-): boolean {
-    const expectedSignature = crypto
-        .createHmac("sha256", secret)
-        .update(body)
-        .digest("hex");
-
-    if (signature.length !== expectedSignature.length) {
-        return false;
-    }
-    return crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature)
-    );
-}
 
 webhookRoutes.post("/razorpay", async (c) => {
     const webhookSecret = config.RAZORPAY_WEBHOOK_SECRET;
@@ -53,12 +34,34 @@ webhookRoutes.post("/razorpay", async (c) => {
     let payload: RazorpayWebhookPayload;
     try {
         payload = JSON.parse(rawBody);
+        if (!payload.event || !payload.payload) {
+            console.warn("Malformed webhook payload — missing event or payload field");
+            return c.json({ error: "Malformed payload" }, 400);
+        }
     } catch {
         return c.json({ error: "Invalid JSON" }, 400);
     }
 
     const eventType = payload.event;
     console.log(`Webhook received: ${eventType}`);
+
+    const entityId = payload.payload.payment?.entity?.id
+        || payload.payload.subscription?.entity?.id
+        || "unknown";
+    const webhookId = `${payload.event}:${entityId}:${payload.created_at}`;
+
+    try {
+        await db.insert(processedWebhooks).values({
+            webhookId,
+            eventType: payload.event,
+        });
+    } catch (error: any) {
+        if (error?.code === "23505") {
+            console.log(`Duplicate webhook skipped: ${webhookId}`);
+            return c.json({ status: "duplicate", webhookId });
+        }
+        throw error;
+    }
 
     await db.insert(auditLogs).values({
         eventType: "webhook.received",

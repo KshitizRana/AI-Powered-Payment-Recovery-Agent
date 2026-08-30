@@ -1,6 +1,6 @@
 import { inngest } from "../client";
 import { MAX_CONCURRENT_RECOVERIES, HARD_DECLINE_WAIT_TIME, DEFAULT_CURRENCY, ESCALATION_WAIT_TIME, HIGH_VALUE_THRESHOLD_PAISE } from "../../constants/constants"; // [CHANGED] added HIGH_VALUE_THRESHOLD_PAISE
-import { db, recoveryAttempts, recoveryActions, auditLogs, customers } from "@repo/db";
+import { db, recoveryAttempts, recoveryActions, auditLogs, customers, and, sql } from "@repo/db";
 import { eq } from "@repo/db";
 import { fetchSubscription, createPaymentLink } from "../../services/razorpay.service";
 import { classifyDeclineCode, ESCALATION_STEPS } from "@repo/shared";
@@ -14,6 +14,7 @@ export const subscriptionRecovery = inngest.createFunction(
         id: "subscription-recovery",
         concurrency: { limit: MAX_CONCURRENT_RECOVERIES }, // max concurrent recoveries
         triggers: [{ event: "payment/subscription.failed" }],
+        idempotency: "event.data.subscriptionId",
         cancelOn: [
             {
                 event: "payment/subscription.recovered",
@@ -40,6 +41,20 @@ export const subscriptionRecovery = inngest.createFunction(
 
         // ── Step 2: Create recovery attempt record ──
         const recovery = await step.run("create-recovery-record", async () => {
+            const [existingActive] = await db
+                .select({ id: recoveryAttempts.id })
+                .from(recoveryAttempts)
+                .where(and(
+                    eq(recoveryAttempts.razorpayEntityId, subscriptionId),
+                    sql`${recoveryAttempts.status} NOT IN ('recovered', 'abandoned', 'escalated')`
+                ))
+                .limit(1);
+
+            if (existingActive) {
+                console.log(`Active recovery already exists for ${subscriptionId}, skipping duplicate`);
+                return null;
+            }
+
             const [record] = await db.insert(recoveryAttempts).values({
                 type: "subscription_renewal",
                 customerId: event.data.customerId,
@@ -61,6 +76,9 @@ export const subscriptionRecovery = inngest.createFunction(
 
             return record;
         });
+        if (!recovery) {
+            return { status: "skipped", reason: "duplicate_active_recovery" };
+        }
 
         // ── Step 3: Log to audit ──
         await step.run("audit-detected", async () => {
@@ -326,7 +344,6 @@ export const subscriptionRecovery = inngest.createFunction(
                     .set({ currentStep: escalation.step, status: "intervention_sent" })
                     .where(eq(recoveryAttempts.id, recovery.id));
 
-                // [FIX] This was being generated and stored but never actually sent
                 if (isContactAction && message) {
                     const recipient = channel === "email" ? event.data.customerEmail : event.data.customerPhone;
                     if (recipient) {

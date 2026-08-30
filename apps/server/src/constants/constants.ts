@@ -15,3 +15,6 @@ export const AI_MESSAGE_TEMPERATURE = 0.7;
 export const AI_NEXT_ACTION_TEMPERATURE = 0.3;
 
 export const HIGH_VALUE_THRESHOLD_PAISE = 10000
+
+// Razorpay timeout constant
+export const RAZORPAY_TIMEOUT_MS = 10_000;
