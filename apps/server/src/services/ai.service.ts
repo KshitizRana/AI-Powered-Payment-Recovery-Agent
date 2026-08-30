@@ -48,11 +48,23 @@ const NextActionSchema = z.object({
     ),
 });
 
+const AbandonmentSchema = z.object({
+    reason: z.enum([
+        "price_hesitation", "technical_issue", "distraction",
+        "comparison_shopping", "trust_concern", "unknown",
+    ]),
+    confidence: z.enum(["low", "medium", "high"]),
+    suggestedTone: z.enum(["reassuring", "urgent_scarcity", "helpful", "no_pressure"]),
+    recommendedFollowUpMinutes: z.number().describe("Minutes to wait before the first follow-up message"),
+    reasoning: z.string(),
+});
+
 // ─── Types ───
 
 export type DiagnosisResult = z.infer<typeof DiagnosisSchema>;
 export type RecoveryMessage = z.infer<typeof RecoveryMessageSchema>;
 export type NextActionResult = z.infer<typeof NextActionSchema>;
+export type AbandonmentClassification = z.infer<typeof AbandonmentSchema>;
 
 export function deriveDisplayName(email?: string | null, fallback = "there"): string {
     if (!email) return fallback;
@@ -415,4 +427,57 @@ function fallbackNextAction(context: {
         stopReason: null,
         waitHours: context.currentStep === 0 ? 0 : DEFAULT_WAIT_HOURS_BETWEEN_STEPS,
     };
+}
+
+export async function classifyAbandonment(context: {
+    amount: number;
+    currency: string;
+    method?: string;
+    minutesOnCheckout?: number;
+    previousAbandonments?: number;
+}): Promise<AbandonmentClassification> {
+    try {
+        const completion = await openAIClient.chat.completions.parse({
+            model: "gpt-4o-mini",
+            messages: [
+                {
+                    role: "system",
+                    content: `You are analyzing why an Indian e-commerce customer abandoned checkout before completing payment.
+
+Signals to weigh:
+- Higher amounts + no previous abandonments → often price_hesitation
+- Repeated abandonments on the same account → often comparison_shopping or trust_concern
+- Very short time on checkout (<30s) before leaving → often technical_issue or distraction
+- UPI/netbanking abandons are frequently technical_issue (app switching, OTP delays)
+
+Recommend a follow-up delay: aggressive (10-15 min) for likely technical_issue or distraction
+(they may just come back), gentler (60-120 min) for price_hesitation or trust_concern
+(give them space, don't feel pushy).`,
+                },
+                {
+                    role: "user",
+                    content: `Classify this abandoned checkout:
+- Amount: ₹${context.amount / 100} (${context.currency})
+- Payment method attempted: ${context.method || "unknown"}
+- Time spent on checkout: ${context.minutesOnCheckout ?? "unknown"} minutes
+- Previous abandonments by this customer: ${context.previousAbandonments ?? 0}`,
+                },
+            ],
+            response_format: zodResponseFormat(AbandonmentSchema, "abandonment"),
+            temperature: 0.3,
+        });
+
+        const result = completion.choices[0]?.message?.parsed;
+        if (!result) throw new Error("Failed to parse abandonment classification");
+        return result;
+    } catch (error) {
+        console.error("AI abandonment classification failed, using fallback:", error);
+        return {
+            reason: "unknown",
+            confidence: "low",
+            suggestedTone: "helpful",
+            recommendedFollowUpMinutes: 60,
+            reasoning: "Rule-based fallback: AI service was unavailable.",
+        };
+    }
 }

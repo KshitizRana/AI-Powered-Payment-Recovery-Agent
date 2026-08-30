@@ -81,4 +81,14 @@ export async function retrySubscriptionCharge(subscriptionId: string) {
     }
 }
 
+export async function fetchOrder(orderId: string) {
+    try {
+        const order = await razorpay.orders.fetch(orderId);
+        return order;
+    } catch (error) {
+        console.error(`Failed to fetch order ${orderId}:`, error);
+        throw error;
+    }
+}
+
 export { razorpay };

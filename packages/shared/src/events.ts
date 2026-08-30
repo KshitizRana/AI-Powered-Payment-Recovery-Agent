@@ -40,6 +40,7 @@ export interface RecoveryEvents {
   "payment/checkout.abandoned": {
     data: {
       orderId: string;
+      customerId?: string
       customerEmail?: string;
       customerPhone?: string;
       amount: number;
@@ -58,5 +59,8 @@ export interface RecoveryEvents {
       subscriptionId: string;
       recoveredAt: string;
     };
+  };
+  "payment/checkout.completed": {
+    data: { orderId: string };
   };
 }

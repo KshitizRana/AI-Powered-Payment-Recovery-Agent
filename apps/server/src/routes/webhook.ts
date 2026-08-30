@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import crypto from "crypto";
-import { db, auditLogs } from "@repo/db";
+import { db, auditLogs, recoveryAttempts, and, eq } from "@repo/db";
 import { WebhookEvent } from "@repo/shared";
 import type { RazorpayWebhookPayload } from "@repo/shared";
 import config from "../config/config";
@@ -113,12 +113,71 @@ webhookRoutes.post("/razorpay", async (c) => {
             break;
         }
         case WebhookEvent.PAYMENT_FAILED: {
-            console.log("Payment failed — logging for now");
-            // TODO: Handle standalone payment failures (checkout abandonment)
+            const payment = payload.payload.payment?.entity;
+            const isSubscriptionRetry = !!payload.payload.subscription;
+
+            if (isSubscriptionRetry) {
+                console.log("Standalone payment.failed but subscription context present — already handled above");
+                break;
+            }
+
+            console.log(`Standalone checkout payment failed — treating as abandonment: ${payment?.order_id}`);
+
+            await inngest.send({
+                name: "payment/checkout.abandoned",
+                data: {
+                    orderId: payment?.order_id || "unknown",
+                    customerEmail: payment?.email,
+                    customerPhone: payment?.contact,
+                    amount: payment?.amount || 0,
+                    currency: payment?.currency || "INR",
+                    method: payment?.method,
+                    abandonedAt: new Date().toISOString(),
+                },
+            });
             break;
         }
         case WebhookEvent.PAYMENT_CAPTURED: {
-            console.log("Payment captured successfully");
+            const payment = payload.payload.payment?.entity;
+            console.log(`✅ Payment captured: ${payment?.id}`);
+            // Check if there's an active checkout recovery for this order
+            if (payment?.order_id) {
+                const [activeRecovery] = await db.select()
+                    .from(recoveryAttempts)
+                    .where(
+                        and(
+                            eq(recoveryAttempts.razorpayEntityId, payment.order_id),
+                            eq(recoveryAttempts.type, "checkout_abandonment"),
+                        )
+                    )
+                    .limit(1);
+                if (activeRecovery && activeRecovery.status !== "recovered") {
+                    await db.update(recoveryAttempts)
+                        .set({
+                            status: "recovered",
+                            amountRecovered: payment.amount,
+                            recoveredAt: new Date(),
+                        })
+                        .where(eq(recoveryAttempts.id, activeRecovery.id));
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: activeRecovery.id,
+                        eventType: "checkout.recovery.completed",
+                        actor: "webhook",
+                        action: `Payment captured for order ${payment.order_id}! ₹${payment.amount / 100} recovered.`,
+                    });
+                }
+            }
+
+            break;
+        }
+        case WebhookEvent.ORDER_PAID: {
+            const order = payload.payload.payment?.entity;
+            console.log(`Order paid — cancelling any running checkout recovery`);
+
+            await inngest.send({
+                name: "payment/checkout.completed",
+                data: { orderId: order?.order_id || "unknown" },
+            });
             break;
         }
         default:

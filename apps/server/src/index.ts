@@ -7,7 +7,7 @@ import { AppError } from "./utils/appError";
 import { webhookRoutes } from "./routes/webhook";
 import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
-import { subscriptionRecovery } from "./inngest/functions";
+import { checkoutRecovery, subscriptionRecovery } from "./inngest/functions";
 
 
 const app = new Hono();
@@ -27,7 +27,7 @@ app.on(
     "/api/inngest",
     serve({
         client: inngest,
-        functions: [subscriptionRecovery],
+        functions: [subscriptionRecovery, checkoutRecovery],
     })
 );
 
