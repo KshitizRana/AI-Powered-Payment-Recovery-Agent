@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db, recoveryAttempts, recoveryActions, auditLogs, customers, notifications } from "@repo/db";
 import { eq, sql, desc, and, count, sum } from "@repo/db";
 import { inngest } from "../inngest/client";
-import { upsertCustomer } from "../services/customer.service";
+import { markCustomerRecovered, upsertCustomer } from "../services/customer.service";
 
 export const apiRoutes = new Hono();
 apiRoutes.get("/recovery/metrics", async (c) => {
@@ -239,8 +239,8 @@ apiRoutes.post("/simulate", async (c) => {
                         customerEmail: email,
                         amount: body.amount || 99900,
                         currency: "INR",
-                        declineCode: "insufficient_balance",
-                        errorDescription: "Payment failed due to insufficient balance",
+                        declineCode: body.declineCode || "insufficient_balance",
+                        errorDescription: body.errorDescription || "Payment failed due to insufficient balance",
                         failedAt: new Date().toISOString(),
                     },
                 });
@@ -294,13 +294,53 @@ apiRoutes.post("/simulate", async (c) => {
             }
 
             case "subscription_recovered": {
-                await inngest.send({
-                    name: "payment/subscription.recovered",
-                    data: {
-                        subscriptionId: body.subscriptionId,
-                        recoveredAt: new Date().toISOString(),
-                    },
-                });
+                const [activeRecovery] = await db.select()
+                    .from(recoveryAttempts)
+                    .where(and(
+                        eq(recoveryAttempts.razorpayEntityId, body.subscriptionId),
+                        eq(recoveryAttempts.type, "subscription_renewal"),
+                    ))
+                    .limit(1);
+
+                if (activeRecovery && activeRecovery.status !== "recovered") {
+                    await db.update(recoveryAttempts)
+                        .set({ status: "recovered", amountRecovered: activeRecovery.amountAtRisk, recoveredAt: new Date() })
+                        .where(eq(recoveryAttempts.id, activeRecovery.id));
+
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: activeRecovery.id, eventType: "recovery.completed",
+                        actor: "webhook", action: `Subscription ${body.subscriptionId} reactivated (simulated). ₹${activeRecovery.amountAtRisk / 100} recovered.`,
+                    });
+
+                    if (activeRecovery.customerId) await markCustomerRecovered(activeRecovery.customerId);
+                }
+
+                await inngest.send({ name: "payment/subscription.recovered", data: { subscriptionId: body.subscriptionId, recoveredAt: new Date().toISOString() } });
+                return c.json({ status: "sent" });
+            }
+            case "checkout_recovered": {
+                const [activeRecovery] = await db.select()
+                    .from(recoveryAttempts)
+                    .where(and(
+                        eq(recoveryAttempts.razorpayEntityId, body.orderId),
+                        eq(recoveryAttempts.type, "checkout_abandonment"),
+                    ))
+                    .limit(1);
+
+                if (activeRecovery && activeRecovery.status !== "recovered") {
+                    await db.update(recoveryAttempts)
+                        .set({ status: "recovered", amountRecovered: activeRecovery.amountAtRisk, recoveredAt: new Date() })
+                        .where(eq(recoveryAttempts.id, activeRecovery.id));
+
+                    await db.insert(auditLogs).values({
+                        recoveryAttemptId: activeRecovery.id, eventType: "recovery.completed",
+                        actor: "webhook", action: `Order ${body.orderId} paid (simulated). ₹${activeRecovery.amountAtRisk / 100} recovered.`,
+                    });
+
+                    if (activeRecovery.customerId) await markCustomerRecovered(activeRecovery.customerId);
+                }
+
+                await inngest.send({ name: "payment/checkout.completed", data: { orderId: body.orderId } });
                 return c.json({ status: "sent" });
             }
 
