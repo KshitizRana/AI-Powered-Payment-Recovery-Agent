@@ -6,7 +6,7 @@ import { fetchSubscription, createPaymentLink } from "../../services/razorpay.se
 import { classifyDeclineCode, ESCALATION_STEPS } from "@repo/shared";
 import { diagnoseFailure, generateRecoveryMessage, determineNextAction, deriveDisplayName } from "../../services/ai.service";
 import { runPreActionGuardrails } from "../../lib/guardrails";
-import { incrementRecoveryAttempts, markCustomerContacted, markCustomerRecovered } from "../../services/customer.service";
+import { getCustomerGuardrailContext, incrementRecoveryAttempts, markCustomerContacted, markCustomerRecovered } from "../../services/customer.service";
 import { sendNotification } from "../../services/notification.service";
 
 export const subscriptionRecovery = inngest.createFunction(
@@ -27,12 +27,17 @@ export const subscriptionRecovery = inngest.createFunction(
 
         // ── Step 1: Classify the failure ──
         const diagnosis = await step.run("ai-diagnose", async () => {
+            const priorAttempts = event.data.customerId
+                ? await getCustomerGuardrailContext(event.data.customerId) // or a dedicated lookup
+                : null;
+
             const result = await diagnoseFailure({
                 errorCode: declineCode,
                 errorDescription: errorDescription,
                 amount,
                 currency: currency || DEFAULT_CURRENCY,
                 customerEmail: event.data.customerEmail,
+                previousAttempts: priorAttempts?.totalRecoveryAttempts ?? 0,
             });
 
             console.log(`AI Diagnosis: ${result.failureCategory} | Action: ${result.recommendedAction}`);
@@ -281,7 +286,6 @@ export const subscriptionRecovery = inngest.createFunction(
             }
 
             // Resolve channel once — AI's pick wins; this fallback chain now mostly
-            // just covers the model returning null, since it already sees preferredChannel above
             const channel = nextAction.channel || guardrail.preferredChannel || escalation.channel;
             const isContactAction = nextAction.action === "send_email" || nextAction.action === "send_sms" || nextAction.action === "send_whatsapp";
 
@@ -328,17 +332,19 @@ export const subscriptionRecovery = inngest.createFunction(
                     paymentLinkUrl = link.short_url;
                 }
 
-                await db.insert(recoveryActions).values({
+                const [action] = await db.insert(recoveryActions).values({
                     recoveryAttemptId: recovery.id,
                     stepNumber: escalation.step,
                     actionType: nextAction.action,
-                    status: "sent",
+                    status: isContactAction ? "pending" : "sent",
                     aiReasoning: nextAction.reasoning,
-                    channel,
+                    channel: isContactAction ? channel : null,
                     messageContent: message?.body,
                     paymentLinkId,
                     paymentLinkUrl,
-                });
+                }).returning();
+
+                if (!action) throw new Error("Failed to create recovery action");
 
                 await db.update(recoveryAttempts)
                     .set({ currentStep: escalation.step, status: "intervention_sent" })
@@ -347,7 +353,7 @@ export const subscriptionRecovery = inngest.createFunction(
                 if (isContactAction && message) {
                     const recipient = channel === "email" ? event.data.customerEmail : event.data.customerPhone;
                     if (recipient) {
-                        await sendNotification(channel, {
+                        const result = await sendNotification(channel, {
                             to: recipient,
                             subject: message.subject,
                             body: message.body,
@@ -356,19 +362,30 @@ export const subscriptionRecovery = inngest.createFunction(
                             actionText: message.callToAction,
                             tone: message.tone,
                             recoveryAttemptId: recovery.id,
+                            recoveryActionId: action.id,
                         });
-                    }
-                }
 
-                if (isContactAction && recovery.customerId) {
-                    await markCustomerContacted(recovery.customerId);
+                        await db.update(recoveryActions)
+                            .set({ status: result.success ? "sent" : "failed" })
+                            .where(eq(recoveryActions.id, action.id));
+
+                        if (result.success && recovery.customerId) {
+                            await markCustomerContacted(recovery.customerId);
+                        }
+                    } else {
+                        await db.update(recoveryActions)
+                            .set({ status: "failed" })
+                            .where(eq(recoveryActions.id, action.id));
+                    }
                 }
 
                 await db.insert(auditLogs).values({
                     recoveryAttemptId: recovery.id,
                     eventType: `recovery.escalation.step-${escalation.step}`,
                     actor: "system",
-                    action: `Executed ${nextAction.action} via ${channel}`,
+                    action: nextAction.action === "retry_payment"
+                        ? `Deferring to Razorpay's own automatic retry for this decline — no direct customer contact this step.`
+                        : `Executed ${nextAction.action} via ${channel}`,
                 });
             });
         }

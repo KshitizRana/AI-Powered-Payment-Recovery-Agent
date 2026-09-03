@@ -126,10 +126,17 @@ webhookRoutes.post("/razorpay", async (c) => {
 
             console.log(`Standalone checkout payment failed — treating as abandonment: ${payment?.order_id}`);
 
+            const customer = await upsertCustomer({
+                razorpayCustomerId: payment?.customer_id,
+                email: payment?.email,
+                phone: payment?.contact,
+            });
+
             await inngest.send({
                 name: "payment/checkout.abandoned",
                 data: {
                     orderId: payment?.order_id || "unknown",
+                    customerId: customer?.id,
                     customerEmail: payment?.email,
                     customerPhone: payment?.contact,
                     amount: payment?.amount || 0,
@@ -142,7 +149,7 @@ webhookRoutes.post("/razorpay", async (c) => {
         }
         case WebhookEvent.PAYMENT_CAPTURED: {
             const payment = payload.payload.payment?.entity;
-            console.log(`✅ Payment captured: ${payment?.id}`);
+            console.log(`Payment captured: ${payment?.id}`);
             // Check if there's an active checkout recovery for this order
             if (payment?.order_id) {
                 const [activeRecovery] = await db.select()
@@ -175,11 +182,38 @@ webhookRoutes.post("/razorpay", async (c) => {
         }
         case WebhookEvent.ORDER_PAID: {
             const order = payload.payload.payment?.entity;
-            console.log(`Order paid — cancelling any running checkout recovery`);
-
+            const payment = payload.payload.payment?.entity;
+            const orderId = order?.id || payment?.order_id || "unknown";
+            console.log(`Order paid — marking recovery as recovered & cancelling workflow`);
+            // Mark the recovery as recovered in DB BEFORE cancelling the Inngest function
+            const [activeRecovery] = await db.select()
+                .from(recoveryAttempts)
+                .where(
+                    and(
+                        eq(recoveryAttempts.razorpayEntityId, orderId),
+                        eq(recoveryAttempts.type, "checkout_abandonment"),
+                    )
+                )
+                .limit(1);
+            if (activeRecovery && activeRecovery.status !== "recovered") {
+                await db.update(recoveryAttempts)
+                    .set({
+                        status: "recovered",
+                        amountRecovered: payment?.amount || activeRecovery.amountAtRisk,
+                        recoveredAt: new Date(),
+                    })
+                    .where(eq(recoveryAttempts.id, activeRecovery.id));
+                await db.insert(auditLogs).values({
+                    recoveryAttemptId: activeRecovery.id,
+                    eventType: "recovery.completed",
+                    actor: "webhook",
+                    action: `Order ${orderId} paid! ₹${(payment?.amount || activeRecovery.amountAtRisk) / 100} recovered.`,
+                });
+            }
+            // Now cancel the Inngest function (it's safe — DB is already updated)
             await inngest.send({
                 name: "payment/checkout.completed",
-                data: { orderId: order?.order_id || "unknown" },
+                data: { orderId },
             });
             break;
         }

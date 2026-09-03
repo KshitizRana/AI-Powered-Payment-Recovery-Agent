@@ -14,73 +14,73 @@ interface GuardrailResult {
 }
 
 // ── 1. DND / Opt-out check ──
-export async function checkDND(customerId?: string): Promise<GuardrailCheck> {
-    if (!customerId) return { allowed: true };
+// export async function checkDND(customerId?: string): Promise<GuardrailCheck> {
+//     if (!customerId) return { allowed: true };
 
-    const [customer] = await db
-        .select({ optedOut: customers.optedOut })
-        .from(customers)
-        .where(eq(customers.id, customerId))
-        .limit(1);
+//     const [customer] = await db
+//         .select({ optedOut: customers.optedOut })
+//         .from(customers)
+//         .where(eq(customers.id, customerId))
+//         .limit(1);
 
-    if (customer?.optedOut) {
-        return { allowed: false, reason: "Customer has opted out of recovery communications" };
-    }
+//     if (customer?.optedOut) {
+//         return { allowed: false, reason: "Customer has opted out of recovery communications" };
+//     }
 
-    return { allowed: true };
-}
+//     return { allowed: true };
+// }
 
 // ── 2. Max attempts per customer in a time window ──
-export async function checkContactFrequency(
-    customerId: string,
-    windowHours: number = 24,
-    maxContacts: number = 2
-): Promise<GuardrailCheck> {
-    const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+// export async function checkContactFrequency(
+//     customerId: string,
+//     windowHours: number = 24,
+//     maxContacts: number = 2
+// ): Promise<GuardrailCheck> {
+//     const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
-    const recentAttempts = await db
-        .select()
-        .from(recoveryAttempts)
-        .where(
-            and(
-                eq(recoveryAttempts.customerId, customerId),
-                gte(recoveryAttempts.createdAt, windowStart)
-            )
-        );
+//     const recentAttempts = await db
+//         .select()
+//         .from(recoveryAttempts)
+//         .where(
+//             and(
+//                 eq(recoveryAttempts.customerId, customerId),
+//                 gte(recoveryAttempts.createdAt, windowStart)
+//             )
+//         );
 
-    if (recentAttempts.length >= maxContacts) {
-        return {
-            allowed: false,
-            reason: `Customer contacted ${recentAttempts.length} times in last ${windowHours}h (limit: ${maxContacts})`,
-        };
-    }
+//     if (recentAttempts.length >= maxContacts) {
+//         return {
+//             allowed: false,
+//             reason: `Customer contacted ${recentAttempts.length} times in last ${windowHours}h (limit: ${maxContacts})`,
+//         };
+//     }
 
-    return { allowed: true };
-}
+//     return { allowed: true };
+// }
 
 // ── 3. Amount threshold check ──
-export function checkAmountThreshold(amountPaise: number, minAmountPaise: number = 10000): GuardrailCheck {
-    if (amountPaise < minAmountPaise) {
-        return {
-            allowed: false,
-            reason: `Amount ₹${amountPaise / 100} is below minimum recovery threshold ₹${minAmountPaise / 100}`,
-        };
-    }
-    return { allowed: true };
-}
+// export function checkAmountThreshold(amountPaise: number, minAmountPaise: number = 10000): GuardrailCheck {
+//     if (amountPaise < minAmountPaise) {
+//         return {
+//             allowed: false,
+//             reason: `Amount ₹${amountPaise / 100} is below minimum recovery threshold ₹${minAmountPaise / 100}`,
+//         };
+//     }
+//     return { allowed: true };
+// }
 
 // ── 4. Validate AI output ──
-export function validateAIOutput(output: any, expectedFields: string[]): GuardrailCheck {
-    for (const field of expectedFields) {
-        if (output[field] === undefined || output[field] === null) {
-            return {
-                allowed: false,
-                reason: `AI output missing required field: ${field}`,
-            };
-        }
-    }
-    return { allowed: true };
-}
+// export function validateAIOutput(output: any, expectedFields: string[]): GuardrailCheck {
+//     for (const field of expectedFields) {
+//         if (output[field] === undefined || output[field] === null) {
+//             return {
+//                 allowed: false,
+//                 reason: `AI output missing required field: ${field}`,
+//             };
+//         }
+//     }
+//     return { allowed: true };
+// }
 
 // ── 5. Run all pre-action guardrails ──
 // export async function runPreActionGuardrails(context: {
@@ -105,6 +105,7 @@ export function validateAIOutput(output: any, expectedFields: string[]): Guardra
 // }
 
 const MIN_CONTACT_GAP_HOURS = 20; // slightly under 24h so a 24h-cadence step never blocks on its own cadence
+const ENFORCE_CONTACT_GAP = process.env.SKIP_CONTACT_GAP_GUARDRAIL !== "true";
 
 export async function runPreActionGuardrails(params: {
     customerId?: string;
@@ -135,12 +136,20 @@ export async function runPreActionGuardrails(params: {
     if (customer.lastContactedAt) {
         const hoursSinceLastContact = (Date.now() - customer.lastContactedAt.getTime()) / (1000 * 60 * 60);
         if (hoursSinceLastContact < MIN_CONTACT_GAP_HOURS) {
-            return {
-                allowed: false,
-                reason: `Contacted ${hoursSinceLastContact.toFixed(1)}h ago — under the ${MIN_CONTACT_GAP_HOURS}h minimum gap`,
-            };
+            if (!ENFORCE_CONTACT_GAP) {
+                console.warn(
+                    `[guardrail bypass] SKIP_CONTACT_GAP_GUARDRAIL=true — would have blocked ` +
+                    `(${hoursSinceLastContact.toFixed(1)}h since last contact, min is ${MIN_CONTACT_GAP_HOURS}h)`
+                );
+            } else {
+                return {
+                    allowed: false,
+                    reason: `Contacted ${hoursSinceLastContact.toFixed(1)}h ago — under the ${MIN_CONTACT_GAP_HOURS}h minimum gap`,
+                };
+            }
         }
     }
 
     return { allowed: true, preferredChannel: customer.preferredChannel };
 }
+

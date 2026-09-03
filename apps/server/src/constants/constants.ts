@@ -1,4 +1,5 @@
-export const AI_MODEL = "gpt-4o-mini";
+export const AI_MODEL = "gpt-5.6-luna";
+// export const AI_MODEL = "gpt-4o-mini";
 
 // Recovery logic constants
 export const MAX_CONCURRENT_RECOVERIES = 10;

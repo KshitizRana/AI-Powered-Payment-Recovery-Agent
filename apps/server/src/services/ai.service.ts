@@ -145,7 +145,7 @@ Be concise and actionable in your reasoning.`,
                 },
             ],
             response_format: zodResponseFormat(DiagnosisSchema, "diagnosis"),
-            temperature: AI_DIAGNOSIS_TEMPERATURE,
+            // temperature: AI_DIAGNOSIS_TEMPERATURE,
         });
 
         const diagnosis = completion.choices[0]?.message?.parsed;
@@ -220,7 +220,7 @@ Keep it short, human voice, and actionable.`,
                 },
             ],
             response_format: zodResponseFormat(RecoveryMessageSchema, "recovery_message"),
-            temperature: AI_MESSAGE_TEMPERATURE,
+            // temperature: AI_MESSAGE_TEMPERATURE,
         });
 
         const message = completion.choices[0]?.message?.parsed;
@@ -299,7 +299,7 @@ ${context.previousActions.length > 0
                 },
             ],
             response_format: zodResponseFormat(NextActionSchema, "next_action"),
-            temperature: AI_NEXT_ACTION_TEMPERATURE,
+            // temperature: AI_NEXT_ACTION_TEMPERATURE,
         });
 
         const result = completion.choices[0]?.message?.parsed;
@@ -314,6 +314,14 @@ ${context.previousActions.length > 0
                 ...result,
                 shouldStop: true,
                 stopReason: `Hard cutoff: ${MAX_RECOVERY_WINDOW_DAYS}-day recovery window exceeded.`,
+            };
+        }
+        if (result.action === "retry_payment" && context.currentStep > 1) {
+            return {
+                ...result,
+                action: "send_email",
+                channel: result.channel || "email",
+                reasoning: `${result.reasoning} (overridden: retry_payment isn't allowed past step 1)`,
             };
         }
 
@@ -436,7 +444,7 @@ export async function classifyAbandonment(context: {
 }): Promise<AbandonmentClassification> {
     try {
         const completion = await openAIClient.chat.completions.parse({
-            model: "gpt-4o-mini",
+            model: AI_MODEL,
             messages: [
                 {
                     role: "system",
@@ -462,7 +470,7 @@ Recommend a follow-up delay: aggressive (10-15 min) for likely technical_issue o
                 },
             ],
             response_format: zodResponseFormat(AbandonmentSchema, "abandonment"),
-            temperature: 0.3,
+            // temperature: 0.3,
         });
 
         const result = completion.choices[0]?.message?.parsed;

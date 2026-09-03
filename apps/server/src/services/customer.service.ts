@@ -77,6 +77,7 @@ export async function getCustomerGuardrailContext(customerId: string) {
             optedOut: customers.optedOut,
             lastContactedAt: customers.lastContactedAt,
             preferredChannel: customers.preferredChannel,
+            totalRecoveryAttempts: customers.totalRecoveryAttempts,
         })
         .from(customers)
         .where(eq(customers.id, customerId))

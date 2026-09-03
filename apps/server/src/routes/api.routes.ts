@@ -56,10 +56,11 @@ apiRoutes.get("/recovery/metrics", async (c) => {
             .groupBy(recoveryAttempts.status);
 
         // 6. Total notifications sent
+        // api.routes.ts, metrics endpoint
         const [notifCount] = await db
             .select({ count: count() })
             .from(notifications)
-            .where(eq(notifications.status, "sent"));
+            .where(sql`${notifications.status} IN ('sent', 'queued', 'delivered')`);
 
         return c.json({
             totalAtRiskPaise: Number(atRisk?.total ?? 0),

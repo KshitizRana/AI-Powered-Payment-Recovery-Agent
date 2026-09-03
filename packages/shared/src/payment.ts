@@ -35,6 +35,7 @@ export interface RazorpayPaymentEntity {
   status: string;
   method: string;
   description?: string;
+  customer_id?: string;
   order_id?: string;
   email?: string;
   contact?: string;
