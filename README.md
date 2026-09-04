@@ -1,20 +1,20 @@
 # AI-Powered Payment Recovery Agent
 
-An agent that detects revenue at risk — failed subscription renewals and abandoned checkouts — diagnoses why, and runs a durable, guardrail-bound recovery workflow to win it back.
+An agent that detects revenue at risk of failed subscription renewals and abandoned checkouts, diagnoses why, and runs a durable, guardrail-bound recovery workflow to win it back.
 
 ## The Problem
 
-Revenue loss from failed payments rarely happens in one clean step: a card expires, a bank declines a charge, a customer abandons checkout mid-purchase. Most businesses either do nothing, or blast every failure with the same generic dunning email regardless of why it actually failed or whether the customer has already opted out. Neither approach recovers as much money as it could, and neither leaves an audit trail a compliance reviewer — or a judge — could actually check.
+Revenue loss from failed payments rarely happens in one clean step: a card expires, a bank declines a charge, a customer abandons checkout mid-purchase. Most businesses either do nothing, or blast every failure with the same generic dunning email regardless of why it actually failed or whether the customer has already opted out. Neither approach recovers as much money as it could, and neither leaves an audit trail a compliance reviewer.
 
 ## What This Does
 
 - Detects failed subscription payments and abandoned checkouts in real time via signed, deduplicated Razorpay webhooks
-- AI diagnoses *why* a payment failed (soft decline / hard decline / gateway error) and decides the next action — not a fixed script
+- AI diagnoses why a payment failed (soft decline / hard decline / gateway error) and decides the next action not a fixed script
 - Runs a durable, multi-day escalation cascade (Day 0 → 1 → 3 → 5 → 7) with hard guardrails: opt-out respect, a minimum gap between contacts, and a minimum-amount threshold
-- Separately classifies *why* a checkout was abandoned and runs a shorter, lighter two-step recovery for it
+- Separately classifies why a checkout was abandoned and runs a shorter, lighter two-step recovery for it
 - Sends real, personalized emails (Mailgen + nodemailer), with SMS as an automatic fallback channel when no email is on file
-- Every AI call has a rule-based fallback — if OpenAI is unreachable, the workflow degrades to deterministic rules instead of crashing
-- Full audit trail of every decision — including decisions *not* to act — visible in a live dashboard
+- Every AI call has a rule-based fallback if OpenAI is unreachable, the workflow degrades to deterministic rules instead of crashing
+- Full audit trail of every decision including decisions not to act visible in a live dashboard
 
 ## Architecture
 
@@ -50,9 +50,7 @@ graph TD
     CR -.cancelOn.-> ING
 ```
 
-**End to end, in plain English:** a Razorpay webhook arrives, gets its signature verified and checked against a table of already-processed webhook IDs, and the customer is looked up or created. Guardrails run before anything else happens — an opted-out customer or a below-threshold amount stops the workflow right there, and that decision is still written to the audit trail even though nothing was sent. If it passes, the AI diagnoses the failure and decides the next action; every step it takes — or explicitly declines to take — is logged, and the whole run can be cancelled instantly if the customer pays through an unrelated channel while it's in progress.
-
-> **Note:** an earlier design pass included a daily proactive-reminder job for subscriptions renewing soon, ahead of any failure. `[CONFIRM: include here if this was built, otherwise remove this note]`
+**End to end, in plain English:** A Razorpay webhook arrives, gets its signature verified and checked against a table of already-processed webhook IDs, and the customer is looked up or created. Guardrails run before anything else happens an opted-out customer or a below-threshold amount stops the workflow right there, and that decision is still written to the audit trail even though nothing was sent. If it passes, the AI diagnoses the failure and decides the next action; every step it takes or explicitly declines to take is logged, and the whole run can be cancelled instantly if the customer pays through an unrelated channel while it's in progress.
 
 ## Tech Stack
 
@@ -63,7 +61,7 @@ graph TD
 - **AI:** OpenAI, structured outputs enforced via Zod schemas (model configurable — see `constants.ts`)
 - **Payments:** Razorpay (Subscriptions, Payment Links, Orders)
 - **Email:** Mailgen + nodemailer over SMTP
-- **Frontend:** `[CONFIRM: Next.js or Vite]` + Tailwind + SWR
+- **Frontend:** Next.js + Tailwind + SWR
 
 ## Setup
 
@@ -97,10 +95,10 @@ Watch it resolve in the dashboard, or follow the Inngest dev server at `http://l
 
 ## Design Decisions
 
-See [`docs/AI_DESIGN.md`](docs/AI_DESIGN.md) for what the AI is trusted to decide versus what's deliberately hard-coded, and [`docs/EDGE_CASES.md`](docs/EDGE_CASES.md) for the specific failure scenarios this system was tested against — including several that were found and fixed during development, not just designed in from the start.
+See [`AI_DESIGN.md`](AI_DESIGN.md) for what the AI is trusted to decide versus what's deliberately hard-coded, and [`EDGE_CASES.md`](EDGECASES.md) for the specific failure scenarios this system was tested against — including several that were found and fixed during development, not just designed in from the start.
 
 ## What's Not Built
 
-- SMS and WhatsApp sends are simulated and logged to the database, not actually delivered — there's no Twilio/WhatsApp Business API integration behind them
-- Proactive pre-failure renewal reminders were scoped but `[CONFIRM: built / not built as of submission]`
-- Money-recovered figures are a total across every recovered attempt, attributed to a specific logged action per rupee — but there is no holdout/control group proving the AI's intervention caused the recovery rather than the customer paying anyway regardless
+- SMS and WhatsApp sends are simulated and logged to the database; there's no Twilio/WhatsApp Business API integration behind them
+- Proactive pre-failure renewal reminders were scoped but not built as of submission.
+- Money-recovered figures are a total across every recovered attempt, attributed to a specific logged action per rupee; but there is no holdout/control group proving the AI's intervention caused the recovery rather than the customer paying anyway regardless
