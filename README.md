@@ -1,159 +1,106 @@
-# Turborepo starter
+# AI-Powered Payment Recovery Agent
 
-This Turborepo starter is maintained by the Turborepo core team.
+An agent that detects revenue at risk — failed subscription renewals and abandoned checkouts — diagnoses why, and runs a durable, guardrail-bound recovery workflow to win it back.
 
-## Using this example
+## The Problem
 
-Run the following command:
+Revenue loss from failed payments rarely happens in one clean step: a card expires, a bank declines a charge, a customer abandons checkout mid-purchase. Most businesses either do nothing, or blast every failure with the same generic dunning email regardless of why it actually failed or whether the customer has already opted out. Neither approach recovers as much money as it could, and neither leaves an audit trail a compliance reviewer — or a judge — could actually check.
 
-```sh
-npx create-turbo@latest
+## What This Does
+
+- Detects failed subscription payments and abandoned checkouts in real time via signed, deduplicated Razorpay webhooks
+- AI diagnoses *why* a payment failed (soft decline / hard decline / gateway error) and decides the next action — not a fixed script
+- Runs a durable, multi-day escalation cascade (Day 0 → 1 → 3 → 5 → 7) with hard guardrails: opt-out respect, a minimum gap between contacts, and a minimum-amount threshold
+- Separately classifies *why* a checkout was abandoned and runs a shorter, lighter two-step recovery for it
+- Sends real, personalized emails (Mailgen + nodemailer), with SMS as an automatic fallback channel when no email is on file
+- Every AI call has a rule-based fallback — if OpenAI is unreachable, the workflow degrades to deterministic rules instead of crashing
+- Full audit trail of every decision — including decisions *not* to act — visible in a live dashboard
+
+## Architecture
+
+```mermaid
+graph TD
+    RP[Razorpay] -->|signed webhook| WH["webhook.ts<br/>signature verify + dedup"]
+    WH -->|upsert| CUST[("customers")]
+    WH -->|send event| ING{Inngest}
+
+    ING --> SR["subscription-recovery.ts<br/>(durable, up to 7 days)"]
+    ING --> CR["checkout-recovery.ts<br/>(durable, cooldown + 1 follow-up)"]
+
+    SR --> GR["guardrails.ts<br/>opted-out / contact-gap / amount"]
+    CR --> GR
+    GR --> CUST
+
+    SR --> AI["ai.service.ts<br/>diagnose / classify → decide → write"]
+    CR --> AI
+    AI -->|structured output| GPT[OpenAI]
+    AI -.on failure.-> RULES[rule-based fallback]
+
+    SR --> RZ["razorpay.service.ts<br/>payment links"]
+    SR --> NOTIF["notification.service.ts<br/>Mailgen + nodemailer"]
+    CR --> NOTIF
+
+    SR --> DB[("Postgres<br/>recovery_attempts, recovery_actions,<br/>audit_logs, notifications")]
+    CR --> DB
+
+    DB --> API["api.routes.ts<br/>metrics / list / detail / simulate"]
+    API --> WEB[Dashboard]
+
+    SR -.cancelOn.-> ING
+    CR -.cancelOn.-> ING
 ```
 
-## What's inside?
+**End to end, in plain English:** a Razorpay webhook arrives, gets its signature verified and checked against a table of already-processed webhook IDs, and the customer is looked up or created. Guardrails run before anything else happens — an opted-out customer or a below-threshold amount stops the workflow right there, and that decision is still written to the audit trail even though nothing was sent. If it passes, the AI diagnoses the failure and decides the next action; every step it takes — or explicitly declines to take — is logged, and the whole run can be cancelled instantly if the customer pays through an unrelated channel while it's in progress.
 
-This Turborepo includes the following packages/apps:
+> **Note:** an earlier design pass included a daily proactive-reminder job for subscriptions renewing soon, ahead of any failure. `[CONFIRM: include here if this was built, otherwise remove this note]`
 
-### Apps and Packages
+## Tech Stack
 
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `eslint-config-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
+- **Runtime:** Bun, TypeScript
+- **API:** Hono
+- **Workflow engine:** Inngest — durable functions, idempotency, event-based cancellation
+- **Database:** PostgreSQL + Drizzle ORM
+- **AI:** OpenAI, structured outputs enforced via Zod schemas (model configurable — see `constants.ts`)
+- **Payments:** Razorpay (Subscriptions, Payment Links, Orders)
+- **Email:** Mailgen + nodemailer over SMTP
+- **Frontend:** `[CONFIRM: Next.js or Vite]` + Tailwind + SWR
 
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
+## Setup
 
-### Utilities
+### Prerequisites
+- Bun installed
+- PostgreSQL running (Docker or local)
+- Razorpay Test Mode account with API keys
+- OpenAI API key
+- SMTP credentials (Mailtrap for dev, Resend for anything closer to production)
+- ngrok (or similar) for local webhook testing
 
-This Turborepo has some additional tools already setup for you:
+### Environment Variables
+See `.env.example` for every variable actually read by the codebase.
 
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
-
-### Build
-
-To build all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo build
+### Install & Run
+```bash
+bun install
+cd packages/db && bunx drizzle-kit push && cd ../..
+npx inngest-cli@latest dev          # terminal 1
+cd apps/server && bun run dev       # terminal 2
+cd apps/web && bun run dev          # terminal 3
 ```
 
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo build
-bun dlx turbo build
-bun exec turbo build
+### Try It
+```bash
+curl -X POST http://localhost:8080/api/simulate \
+  -H "Content-Type: application/json" \
+  -d '{"type": "subscription_soft_decline", "amount": 99900}'
 ```
+Watch it resolve in the dashboard, or follow the Inngest dev server at `http://localhost:8288` to see each step of the cascade run individually.
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+## Design Decisions
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
+See [`docs/AI_DESIGN.md`](docs/AI_DESIGN.md) for what the AI is trusted to decide versus what's deliberately hard-coded, and [`docs/EDGE_CASES.md`](docs/EDGE_CASES.md) for the specific failure scenarios this system was tested against — including several that were found and fixed during development, not just designed in from the start.
 
-```sh
-turbo build --filter=docs
-```
+## What's Not Built
 
-Without global `turbo`:
-
-```sh
-npx turbo build --filter=docs
-bun exec turbo build --filter=docs
-bun exec turbo build --filter=docs
-```
-
-### Develop
-
-To develop all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo dev
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo dev
-bun exec turbo dev
-bun exec turbo dev
-```
-
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo dev --filter=web
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo dev --filter=web
-bun exec turbo dev --filter=web
-bun exec turbo dev --filter=web
-```
-
-### Remote Caching
-
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
-
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
-
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo login
-bun exec turbo login
-bun exec turbo login
-```
-
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
-
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo link
-bun exec turbo link
-bun exec turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+- SMS and WhatsApp sends are simulated and logged to the database, not actually delivered — there's no Twilio/WhatsApp Business API integration behind them
+- Proactive pre-failure renewal reminders were scoped but `[CONFIRM: built / not built as of submission]`
+- Money-recovered figures are a total across every recovered attempt, attributed to a specific logged action per rupee — but there is no holdout/control group proving the AI's intervention caused the recovery rather than the customer paying anyway regardless
