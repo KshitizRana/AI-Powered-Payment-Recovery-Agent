@@ -50,7 +50,7 @@ graph TD
     CR -.cancelOn.-> ING
 ```
 
-**End to end, in plain English:** A Razorpay webhook arrives, gets its signature verified and checked against a table of already-processed webhook IDs, and the customer is looked up or created. Guardrails run before anything else happens an opted-out customer or a below-threshold amount stops the workflow right there, and that decision is still written to the audit trail even though nothing was sent. If it passes, the AI diagnoses the failure and decides the next action; every step it takes or explicitly declines to take is logged, and the whole run can be cancelled instantly if the customer pays through an unrelated channel while it's in progress.
+**End to end flow:** A Razorpay webhook arrives, gets its signature verified and checked against a table of already-processed webhook IDs, and the customer is looked up or created. Guardrails run before anything else happens an opted-out customer or a below-threshold amount stops the workflow right there, and that decision is still written to the audit trail even though nothing was sent. If it passes, the AI diagnoses the failure and decides the next action; every step it takes or explicitly declines to take is logged, and the whole run can be cancelled instantly if the customer pays through an unrelated channel while it's in progress.
 
 ## Tech Stack
 
@@ -71,7 +71,7 @@ graph TD
 - Razorpay Test Mode account with API keys
 - OpenAI API key
 - SMTP credentials (Mailtrap for dev, Resend for anything closer to production)
-- ngrok (or similar) for local webhook testing
+- cloudfare/ngrok (or similar) for local webhook testing
 
 ### Environment Variables
 See `.env.example` for every variable actually read by the codebase.
