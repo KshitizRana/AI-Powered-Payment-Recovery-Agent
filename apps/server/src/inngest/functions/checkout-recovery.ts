@@ -235,7 +235,6 @@ export const checkoutRecovery = inngest.createFunction(
 
         // ── AI-recommended follow-up window ──
         const followUpMinutes = Math.max(classification.recommendedFollowUpMinutes, 10);
-        // await step.sleep("wait-follow-up", `${followUpMinutes}m`);
         const sleepDuration = process.env.FAST_DEMO_MODE === "true" ? "15s" : `${followUpMinutes}m`;
         await step.sleep("wait-follow-up", sleepDuration);
 

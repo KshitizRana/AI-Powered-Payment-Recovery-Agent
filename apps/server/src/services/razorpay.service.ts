@@ -40,7 +40,6 @@ export async function fetchSubscription(subscriptionId: string) {
         return subscription;
     } catch (error: any) {
         console.error(`Failed to fetch subscription ${subscriptionId}:`, error);
-        
         const statusCode = error?.statusCode ?? error?.status;
         const wrapped = new Error(
             error?.message || `Razorpay API Error: ${JSON.stringify(error)}`
@@ -51,13 +50,13 @@ export async function fetchSubscription(subscriptionId: string) {
 }
 
 interface CreatePaymentLinkOptions {
-    amount: number; // in paise
+    amount: number; 
     currency?: string;
     customerName?: string;
     customerEmail?: string;
     customerPhone?: string;
     description?: string;
-    expireBy?: number; // Unix timestamp
+    expireBy?: number;
 }
 
 export async function createPaymentLink(options: CreatePaymentLinkOptions) {
@@ -95,8 +94,6 @@ export async function createPaymentLink(options: CreatePaymentLinkOptions) {
 
 export async function retrySubscriptionCharge(subscriptionId: string) {
     try {
-        // Razorpay doesn't have a direct "retry" — the subscription auto-retries
-        // based on its config. But you can fetch the latest state.
         const subscription = await razorpay.subscriptions.fetch(subscriptionId);
         return subscription;
     } catch (error) {

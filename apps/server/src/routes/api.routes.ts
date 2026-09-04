@@ -66,7 +66,7 @@ apiRoutes.get("/recovery/metrics", async (c) => {
             totalAtRiskPaise: Number(atRisk?.total ?? 0),
             totalRecoveredPaise: Number(recovered?.total ?? 0),
             activeWorkflows: Number(active?.count ?? 0),
-            recoveryRate: Math.round(rate * 10) / 10,    // one decimal
+            recoveryRate: Math.round(rate * 10) / 10,
             totalNotificationsSent: Number(notifCount?.count ?? 0),
             statusBreakdown: breakdown.reduce((acc, row) => {
                 acc[row.status] = Number(row.count);
@@ -87,8 +87,8 @@ apiRoutes.get("/recovery/list", async (c) => {
         const limit = Math.min(50, Math.max(1, Number(c.req.query("limit") || "20")));
         const offset = (page - 1) * limit;
 
-        const statusFilter = c.req.query("status");   // e.g. ?status=recovered
-        const typeFilter = c.req.query("type");        // e.g. ?type=subscription_renewal
+        const statusFilter = c.req.query("status");   
+        const typeFilter = c.req.query("type");        
 
         // Build WHERE conditions
         const conditions = [];
@@ -227,7 +227,7 @@ apiRoutes.post("/simulate", async (c) => {
         switch (type) {
             case "subscription_soft_decline": {
                 const subId = `sub_sim_${Date.now()}`;
-                const customer = await upsertCustomer({ // [FIX] was missing — customerId was always undefined
+                const customer = await upsertCustomer({ 
                     razorpayCustomerId: `cust_sim_${Date.now()}`,
                     email,
                 });
@@ -249,7 +249,7 @@ apiRoutes.post("/simulate", async (c) => {
 
             case "subscription_hard_decline": {
                 const subId = `sub_sim_${Date.now()}`;
-                const customer = await upsertCustomer({ // [FIX]
+                const customer = await upsertCustomer({
                     razorpayCustomerId: `cust_sim_${Date.now()}`,
                     email,
                 });
@@ -271,10 +271,8 @@ apiRoutes.post("/simulate", async (c) => {
 
             case "checkout_abandoned": {
                 const orderId = `order_sim_${Date.now()}`;
-                // Checkout is often a guest flow, so a customer record here is
-                // optional in real life — but for demo purposes, wiring it up
-                // means the dashboard shows a real email instead of a blank customer.
-                const customer = await upsertCustomer({ // [FIX]
+                
+                const customer = await upsertCustomer({
                     razorpayCustomerId: `cust_sim_${Date.now()}`,
                     email,
                 });

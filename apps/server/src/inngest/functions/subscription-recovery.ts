@@ -263,9 +263,9 @@ export const subscriptionRecovery = inngest.createFunction(
                     maxSteps: ESCALATION_STEPS.length,
                     previousActions: prev.map(p => ({ actionType: p.actionType, status: p.status, channel: p.channel || undefined })),
                     amount,
-                    customerOptedOut: false, // Handled by guardrails
+                    customerOptedOut: false,
                     daysSinceFailure,
-                    preferredChannel: guardrail.preferredChannel, // [NEW] AI now sees this before deciding, not just as a fallback after
+                    preferredChannel: guardrail.preferredChannel,
                 });
             });
 
@@ -299,7 +299,7 @@ export const subscriptionRecovery = inngest.createFunction(
                         currency: currency || DEFAULT_CURRENCY,
                         failureCategory: diagnosis.failureCategory,
                         escalationStep: escalation.step,
-                        maxSteps: ESCALATION_STEPS.length, // [NEW] required param — replaces the old hardcoded "of 5"
+                        maxSteps: ESCALATION_STEPS.length,
                         channel,
                         productDescription: "your subscription",
                     });
@@ -311,10 +311,6 @@ export const subscriptionRecovery = inngest.createFunction(
                 let paymentLinkId: string | undefined;
                 let paymentLinkUrl: string | undefined;
 
-                // [FIX] A payment link isn't just for the "send_payment_link" action — almost
-                // every contact action's whole point is getting the customer somewhere they
-                // can pay. Mint one for any contact action too, not only when the AI's label
-                // literally says send_payment_link.
                 const needsLink = nextAction.action === "send_payment_link" || isContactAction;
 
                 if (needsLink) {

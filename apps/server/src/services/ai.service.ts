@@ -161,8 +161,6 @@ Be concise and actionable in your reasoning.`,
 
 // ─── 2. Generate Recovery Message ──
 function resolveTone(escalationStep: number, maxSteps: number): string {
-    // Progress-based instead of an absolute step-number lookup — works correctly
-    // whether this is a 5-step subscription cascade or a 2-step checkout follow-up.
     const progress = maxSteps > 1 ? escalationStep / maxSteps : 1;
     if (progress <= 0.25) return "friendly and helpful";
     if (progress <= 0.5) return "gently urgent";
@@ -307,8 +305,6 @@ ${context.previousActions.length > 0
             throw new Error("Failed to parse next action");
         }
 
-        // Belt-and-suspenders: don't rely on the model alone to enforce the hard
-        // time cutoff, even though rule 3 above tells it to.
         if (context.daysSinceFailure > MAX_RECOVERY_WINDOW_DAYS && !result.shouldStop) {
             return {
                 ...result,
