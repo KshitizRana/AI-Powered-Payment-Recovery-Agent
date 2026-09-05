@@ -217,6 +217,35 @@ webhookRoutes.post("/razorpay", async (c) => {
             });
             break;
         }
+        case WebhookEvent.SUBSCRIPTION_CANCELLED: {
+            const sub = payload.payload.subscription?.entity;
+            console.log(`Subscription ${sub?.id} cancelled by customer — stopping any active recovery`);
+
+            const [activeRecovery] = await db.select()
+                .from(recoveryAttempts)
+                .where(and(
+                    eq(recoveryAttempts.razorpayEntityId, sub?.id || ""),
+                    eq(recoveryAttempts.type, "subscription_renewal"),
+                ))
+                .limit(1);
+
+            if (activeRecovery && !["recovered", "abandoned", "escalated"].includes(activeRecovery.status)) {
+                await db.update(recoveryAttempts)
+                    .set({ status: "abandoned", abandonedAt: new Date() })
+                    .where(eq(recoveryAttempts.id, activeRecovery.id));
+
+                await db.insert(auditLogs).values({
+                    recoveryAttemptId: activeRecovery.id,
+                    eventType: "recovery.abandoned",
+                    actor: "webhook",
+                    action: `Subscription ${sub?.id} was cancelled by the customer — this was never a failure to fix, recovery stopped.`,
+                });
+            }
+
+            await inngest.send({ name: "payment/subscription.cancelled", data: { subscriptionId: sub?.id || "unknown" } });
+            break;
+        }
+
         default:
             console.log(`Unhandled webhook event: ${eventType}`);
     }

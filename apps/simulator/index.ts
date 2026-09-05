@@ -1,17 +1,9 @@
 import dotenv from "dotenv";
-
 dotenv.config();
-import { SOFT_DECLINES, HARD_DECLINES, randomEmail, randomAmount, randomName } from "./data";
 
 const API = process.env.SERVER_URL || "http://localhost:8080";
 
-interface Result {
-    type: string;
-    email: string;
-    amount: number;
-    status: "sent" | "failed";
-}
-
+// ─── Helper ────────────────────────────────────────────────────────────────────
 async function simulate(payload: Record<string, any>): Promise<any> {
     try {
         const res = await fetch(`${API}/api/v1/simulate`, {
@@ -19,90 +11,178 @@ async function simulate(payload: Record<string, any>): Promise<any> {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+            const text = await res.text();
+            console.error(`  ✗ HTTP ${res.status}: ${text.slice(0, 120)}`);
+            return null;
+        }
         return await res.json();
     } catch (error) {
-        console.error("Request failed:", error);
+        console.error("  ✗ Request failed:", error);
         return null;
     }
 }
 
-// Small delay between sends — firing 80 events in a tight loop means 80
-// near-simultaneous OpenAI calls in the first Inngest step of each run
-// (diagnoseFailure). Staggering avoids hammering the rate limit and mirrors
-// how failures actually arrive in the real world anyway — not all at once.
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ─── Curated Scenarios ─────────────────────────────────────────────────────────
+//
+// Why a simulator instead of Razorpay directly?
+// Razorpay test mode auto-retries every "failed" charge within seconds and
+// typically succeeds — so a real webhook failure gets immediately overwritten
+// by a success before our cascade can even start. The simulator fires the exact
+// Inngest events our production webhook handler would fire, letting us observe
+// the full 5-step or 2-step cascade without race conditions.
+//
+// Each scenario below is designed to run its FULL cascade:
+//  • Subscription (5-step): runs all 5 AI decisions, no self-resolve, so the
+//    dashboard shows step 1/5 → 2/5 → ... → 5/5 → abandoned (or escalated).
+//  • Checkout (2-step): runs both emails, so 2/2 is visible.
+//  • "Recovered" variants: self-resolve fires ~20 s after the failure so the
+//    dashboard shows the cancel-on-payment path working live.
+//  • Guardrail-blocked: amount below threshold, so the cascade is stopped at
+//    the door and appears as abandoned with reason in the audit trail.
+//
+interface Scenario {
+    label: string;
+    type: string;
+    email: string;
+    amount: number;
+    declineCode?: string;
+    errorDescription?: string;
+    method?: string;
+    selfResolve?: boolean;
+    resolveDelay?: number;
+}
+
+const SCENARIOS: Scenario[] = [
+    // ── Subscription failures ──────────────────────────────────────────────
+    {
+        label: "Sub: Soft decline (insufficient balance) — full 5-step cascade",
+        type: "subscription_soft_decline",
+        email: "priya.sharma@demo-test.com",
+        amount: 99900,      // Rs 999 — ordinary SaaS tier
+        declineCode: "insufficient_balance",
+        errorDescription: "Payment failed due to insufficient balance",
+        selfResolve: false,
+    },
+    {
+        label: "Sub: Hard decline (expired card) — full 5-step cascade",
+        type: "subscription_hard_decline",
+        email: "rohan.patel@demo-test.com",
+        amount: 249900,     // Rs 2,499
+        declineCode: "card_expired",
+        errorDescription: "Card has expired",
+        selfResolve: false,
+    },
+    {
+        label: "Sub: Soft decline — recovers after Step 1 (shows cancelOn working)",
+        type: "subscription_soft_decline",
+        email: "ananya.kumar@demo-test.com",
+        amount: 49900,      // Rs 499
+        declineCode: "bank_transaction_limit_exceeded",
+        errorDescription: "Transaction limit exceeded for the day",
+        selfResolve: true,
+        resolveDelay: 22000,  // 22 s — fires after first email, before step 2
+    },
+    {
+        label: "Sub: High value (Rs 7,500) — should escalate to human if unrecovered",
+        type: "subscription_hard_decline",
+        email: "vikram.singh@demo-test.com",
+        amount: 750000,     // Rs 7,500
+        declineCode: "lost_or_stolen_card",
+        errorDescription: "Card reported lost or stolen",
+        selfResolve: false,
+    },
+    {
+        label: "Sub: Guardrail blocked — amount below threshold (Rs 30)",
+        type: "subscription_soft_decline",
+        email: "neha.reddy@demo-test.com",
+        amount: 3000,       // Rs 30 — below MIN_RECOVERY_AMOUNT_PAISE, guardrail fires
+        declineCode: "insufficient_balance",
+        errorDescription: "Payment failed due to insufficient balance",
+        selfResolve: false,
+    },
+    // ── Checkout abandonment ───────────────────────────────────────────────
+    {
+        label: "Checkout: UPI abandoned — full 2-step cascade",
+        type: "checkout_abandoned",
+        email: "karan.iyer@demo-test.com",
+        amount: 199900,     // Rs 1,999
+        method: "upi",
+        selfResolve: false,
+    },
+    {
+        label: "Checkout: Card abandoned — recovers after Step 1",
+        type: "checkout_abandoned",
+        email: "divya.gupta@demo-test.com",
+        amount: 99900,      // Rs 999
+        method: "card",
+        selfResolve: true,
+        resolveDelay: 20000,  // 20 s
+    },
+    {
+        label: "Checkout: Guardrail blocked — amount below threshold (Rs 25)",
+        type: "checkout_abandoned",
+        email: "arjun.rao@demo-test.com",
+        amount: 2500,       // Rs 25 — guardrail fires
+        method: "upi",
+        selfResolve: false,
+    },
+];
+
+// ─── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-    const results: Result[] = [];
-    let sent = 0;
-    let failed = 0;
+    console.log("\n=== Demo Batch: 8 curated scenarios ===");
+    console.log("Each one is designed to run its full cascade (5/5 or 2/2).\n");
 
-    console.log("=== Batch Simulation Starting ===\n");
+    for (let i = 0; i < SCENARIOS.length; i++) {
+        const s = SCENARIOS[i];
+        console.log(`[${i + 1}/${SCENARIOS.length}] ${s.label}`);
 
-    // 50 failed subscriptions — mixed soft/hard decline, ~70/30 split
-    console.log("Generating 50 failed subscriptions...");
-    for (let i = 0; i < 50; i++) {
-        const isHard = Math.random() < 0.3;
-        const pool = isHard ? HARD_DECLINES : SOFT_DECLINES;
-        const decline = pool[Math.floor(Math.random() * pool.length)];
-        const email = randomEmail(i);
-        const amount = randomAmount();
+        const payload: Record<string, any> = {
+            type: s.type,
+            email: s.email,
+            amount: s.amount,
+        };
+        if (s.declineCode)      payload.declineCode = s.declineCode;
+        if (s.errorDescription) payload.errorDescription = s.errorDescription;
+        if (s.method)           payload.method = s.method;
 
-        const res = await simulate({
-            type: isHard ? "subscription_hard_decline" : "subscription_soft_decline",
-            email,
-            amount,
-            declineCode: decline.code,
-            errorDescription: decline.description,
-        });
+        const res = await simulate(payload);
 
-        const ok = res !== null;
-        ok ? sent++ : failed++;
-        results.push({ type: isHard ? "hard_decline" : "soft_decline", email, amount, status: ok ? "sent" : "failed" });
+        if (res) {
+            console.log(`  ✓ Queued — id: ${res.subscriptionId ?? res.orderId ?? "?"}`);
 
-        // Self-resolve ~40% of successful events to make the mix look organic
-        if (ok && Math.random() < 0.4) {
-            setTimeout(() => {
-                simulate({ type: "subscription_recovered", subscriptionId: res.subscriptionId });
-            }, (5 + Math.random() * 20) * 1000); // resolves 5–25s later
+            // Schedule self-resolution for "recovers" scenarios
+            if (s.selfResolve) {
+                const delay = s.resolveDelay ?? 20000;
+                const capturedRes = res;
+                const capturedType = s.type;
+                setTimeout(async () => {
+                    const resolveType = capturedType.startsWith("subscription")
+                        ? "subscription_recovered"
+                        : "checkout_recovered";
+                    const resolvePayload = capturedType.startsWith("subscription")
+                        ? { type: resolveType, subscriptionId: capturedRes.subscriptionId }
+                        : { type: resolveType, orderId: capturedRes.orderId };
+                    await simulate(resolvePayload);
+                    console.log(`  -> [${i + 1}] Self-resolved (${resolveType})`);
+                }, delay);
+            }
+        } else {
+            console.log("  ✗ Failed — is the server running on", API, "?");
         }
 
-        if (i % 10 === 0) console.log(`  ${i}/50...`);
-        await sleep(300);
+        // Stagger by 1 s between scenarios so Inngest and the AI are not hit simultaneously
+        await sleep(1000);
     }
 
-    console.log("\nGenerating 30 abandoned checkouts...");
-    for (let i = 0; i < 30; i++) {
-        const email = randomEmail(i + 50);
-        const amount = randomAmount();
-
-        const res = await simulate({
-            type: "checkout_abandoned",
-            email,
-            amount,
-            method: Math.random() < 0.6 ? "upi" : "card",
-        });
-
-        const ok = res !== null;
-        ok ? sent++ : failed++;
-        results.push({ type: "checkout_abandoned", email, amount, status: ok ? "sent" : "failed" });
-
-        // Self-resolve ~40% of successful events to make the mix look organic
-        if (ok && Math.random() < 0.4) {
-            setTimeout(() => {
-                simulate({ type: "checkout_recovered", orderId: res.orderId });
-            }, (5 + Math.random() * 20) * 1000); // resolves 5–25s later
-        }
-
-        if (i % 10 === 0) console.log(`  ${i}/30...`);
-        await sleep(300);
-    }
-
-    console.log(`\n=== Batch Complete: ${sent} sent, ${failed} failed ===`);
-    console.log("\nRun `bun run report` in a few minutes once the cascades have had time to process the first step or two.");
+    console.log("\n=== All 8 scenarios queued ===");
+    console.log("Watch Inngest at http://localhost:8288");
+    console.log("Then run: bun run report\n");
 }
 
 main().catch(console.error);

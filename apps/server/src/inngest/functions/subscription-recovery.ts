@@ -20,6 +20,10 @@ export const subscriptionRecovery = inngest.createFunction(
                 event: "payment/subscription.recovered",
                 if: "async.data.subscriptionId == event.data.subscriptionId",
             },
+            {
+                event: "payment/subscription.cancelled",
+                if: "async.data.subscriptionId == event.data.subscriptionId",
+            },
         ],
     },
     async ({ event, step }) => {

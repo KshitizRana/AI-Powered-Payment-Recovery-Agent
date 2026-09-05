@@ -1,4 +1,4 @@
-export const AI_MODEL = "gpt-5.6-luna";
+export const AI_MODEL = "gpt-5-nano";
 // export const AI_MODEL = "gpt-4o-mini";
 
 // Recovery logic constants

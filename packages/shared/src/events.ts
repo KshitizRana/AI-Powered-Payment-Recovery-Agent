@@ -63,4 +63,7 @@ export interface RecoveryEvents {
   "payment/checkout.completed": {
     data: { orderId: string };
   };
+  "payment/subscription.cancelled": {
+    data: { subscriptionId: string };
+  };
 }

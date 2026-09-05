@@ -136,7 +136,7 @@ export async function runPreActionGuardrails(params: {
     if (customer.lastContactedAt) {
         const hoursSinceLastContact = (Date.now() - customer.lastContactedAt.getTime()) / (1000 * 60 * 60);
         const effectiveMinGap = process.env.FAST_DEMO_MODE === "true" ? 0 : MIN_CONTACT_GAP_HOURS;
-        if (hoursSinceLastContact < MIN_CONTACT_GAP_HOURS) {
+        if (hoursSinceLastContact < effectiveMinGap) {
             if (!ENFORCE_CONTACT_GAP) {
                 console.warn(
                     `[guardrail bypass] SKIP_CONTACT_GAP_GUARDRAIL=true — would have blocked ` +
