@@ -1,20 +1,22 @@
 # AI-Powered Payment Recovery Agent
 
-An agent that detects revenue at risk of failed subscription renewals and abandoned checkouts, diagnoses why, and runs a durable, guardrail-bound recovery workflow to win it back.
+An agent that detects revenue at risk from failed subscription renewals and abandoned checkouts, diagnoses the underlying cause, and runs a durable, guardrail-bound recovery workflow to win that revenue back.
 
 ## The Problem
 
-Revenue loss from failed payments rarely happens in one clean step: a card expires, a bank declines a charge, a customer abandons checkout mid-purchase. Most businesses either do nothing, or blast every failure with the same generic dunning email regardless of why it actually failed or whether the customer has already opted out. Neither approach recovers as much money as it could, and neither leaves an audit trail a compliance reviewer.
+Revenue loss from failed payments rarely happens in a single, clean step: a card expires, a bank declines a charge, or a customer abandons checkout midway through a purchase. Most businesses either do nothing or blast every failure with the same generic dunning email, regardless of why the payment failed or whether the customer has already opted out.
+Neither approach recovers as much revenue as possible, and neither provides the audit trail that a compliance reviewer needs.
 
 ## What This Does
 
-- Detects failed subscription payments and abandoned checkouts in real time via signed, deduplicated Razorpay webhooks
-- AI diagnoses why a payment failed (soft decline / hard decline / gateway error) and decides the next action not a fixed script
-- Runs a durable, multi-day escalation cascade (Day 0 → 1 → 3 → 5 → 7) with hard guardrails: opt-out respect, a minimum gap between contacts, and a minimum-amount threshold
-- Separately classifies why a checkout was abandoned and runs a shorter, lighter two-step recovery for it
-- Sends real, personalized emails (Mailgen + nodemailer), with SMS as an automatic fallback channel when no email is on file
+- Detects failed subscription payments and abandoned checkouts in real time via signed, deduplicated Razorpay webhooks.
+- Diagnoses why a payment failed using AI (soft decline, hard decline, or gateway error) and determines the next action dynamically rather than following a fixed script.
+- Runs a durable, multi-day escalation cascade (Day 0 → 1 → 3 → 5 → 7) with hard guardrails, including opt-out enforcement, a minimum gap between contacts, and a minimum-amount threshold.
+- Separately classifies checkout abandonment reasons and runs a shorter, lighter two-step recovery workflow.
+- Sends personalized emails using Mailgen and Nodemailer, with SMS as an automatic fallback channel when no email address is available.
 - Every AI call has a rule-based fallback if OpenAI is unreachable, the workflow degrades to deterministic rules instead of crashing
-- Full audit trail of every decision including decisions not to act visible in a live dashboard
+- Falls back to deterministic, rule-based logic whenever OpenAI is unreachable, ensuring that the workflow degrades gracefully instead of crashing.
+- Maintains a complete audit trail for every decision, including actions that were explicitly declined, all of which is visible in a live dashboard.
 
 ## Architecture
 
